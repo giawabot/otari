@@ -2360,6 +2360,19 @@
             "default": "auto",
             "title": "Reasoning Effort"
           },
+          "residency": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
+            "title": "Residency"
+          },
           "response_format": {
             "anyOf": [
               {
@@ -6181,6 +6194,19 @@
               }
             ],
             "title": "Prompt Cache Key"
+          },
+          "residency": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
+            "title": "Residency"
           },
           "service_tier": {
             "anyOf": [
@@ -10635,6 +10661,19 @@
             ],
             "title": "Reasoning"
           },
+          "residency": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
+            "title": "Residency"
+          },
           "response_format": {
             "anyOf": [
               {
@@ -13604,6 +13643,18 @@
               }
             ],
             "title": "Request Group Id"
+          },
+          "residency_audit": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Residency Audit"
           },
           "selection_reason": {
             "anyOf": [
@@ -20130,6 +20181,24 @@
               ],
               "description": "Filter models by provider name",
               "title": "Provider"
+            }
+          },
+          {
+            "description": "Filter the catalog to models that clear a residency bar: 'canadian' (level 2+), 'sovereign' (level 3+), 'sovereign_model' (level 4).",
+            "in": "query",
+            "name": "residency",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter the catalog to models that clear a residency bar: 'canadian' (level 2+), 'sovereign' (level 3+), 'sovereign_model' (level 4).",
+              "title": "Residency"
             }
           }
         ],

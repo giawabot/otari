@@ -25,6 +25,7 @@ from gateway.models.entities import APIKey, ModelPricing
 from gateway.models.money import as_float
 from gateway.models.routing import PolicySpec
 from gateway.models.tenancy import User as TenancyUser
+from gateway.repositories.sovereignty_repository import list_sovereignty_rows
 from gateway.services.alias_service import effective_aliases
 from gateway.services.model_access import is_model_allowed, resolve_request_allowlist
 from gateway.services.model_catalog_service import (
@@ -48,8 +49,10 @@ from gateway.services.pricing_service import (
     normalize_effective_at,
 )
 from gateway.services.provider_kwargs import is_deployment_instance_key, normalize_pricing_key
+from gateway.services.sovereignty_access import build_sovereignty_map, is_sovereign_enough, parse_residency_bar
 from gateway.services.tenancy.deployment_user_service import DeploymentUserService
 from gateway.services.tenancy.organization_model_access import resolve_session_catalog_scope
+from gateway.services.workspace_scope import organization_for_workspace_id
 
 if TYPE_CHECKING:
     from any_llm.types.model import Model
@@ -546,6 +549,15 @@ async def list_models(
     auth: Annotated[tuple[APIKey | None, bool], Depends(verify_catalog_reader)],
     session_identity: Annotated[TenancyUser | None, Depends(get_session_identity)],
     provider: Annotated[str | None, Query(description="Filter models by provider name")] = None,
+    residency: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Filter the catalog to models that clear a residency bar: "
+                "'canadian' (level 2+), 'sovereign' (level 3+), 'sovereign_model' (level 4)."
+            )
+        ),
+    ] = None,
 ) -> ModelListResponse:
     """List all available models.
 
@@ -691,16 +703,18 @@ async def list_models(
     # catalog never advertises a model that would 403 at inference. Both surfaces
     # feed the SAME matcher the SAME canonical instance:model key; an alias id is a
     # display name, so it is matched on its resolved target. Master key sees all.
+    # A dynamic policy is listed when the key may use *any* of its candidates,
+    # which is what the compiler will do at request time: it drops the ones the
+    # key cannot use and serves from the rest. Hiding it unless every candidate
+    # were permitted would withhold a policy the caller can in fact call.
+    # Built outside the allow-list branch because the residency filter below
+    # needs the same candidate view.
+    dynamic_reachable = {
+        name: [normalize_pricing_key(config, selector) for selector in spec.static_selectors()]
+        for name, spec in dynamic_policies.items()
+    }
     key_allowlist = scope.allowlist
     if key_allowlist is not None:
-        # A dynamic policy is listed when the key may use *any* of its candidates,
-        # which is what the compiler will do at request time: it drops the ones the
-        # key cannot use and serves from the rest. Hiding it unless every candidate
-        # were permitted would withhold a policy the caller can in fact call.
-        dynamic_reachable = {
-            name: [normalize_pricing_key(config, selector) for selector in spec.static_selectors()]
-            for name, spec in dynamic_policies.items()
-        }
 
         def _permitted(model_id: str) -> bool:
             candidates = dynamic_reachable.get(model_id)
@@ -713,6 +727,40 @@ async def list_models(
 
     for obj in merged.values():
         _mark_deployment_managed(config, obj)
+
+    # Residency catalog filter: keep only the models a residency bar would
+    # admit at request time. Same map, same matcher the pipeline uses, so
+    # what the catalog shows and what dispatch serves cannot disagree. A
+    # dynamic policy stays listed when *any* of its candidates clears the
+    # bar, mirroring the compiler's per-candidate drop.
+    if residency is not None:
+        try:
+            required_level = parse_residency_bar(residency)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        caller_workspace = auth[0].workspace_id if auth[0] is not None else None
+        residency_org_id = (
+            await organization_for_workspace_id(db, caller_workspace) if caller_workspace else None
+        )
+        rows = await list_sovereignty_rows(db, organization_id=residency_org_id)
+        sovereignty_map = build_sovereignty_map(config, rows)
+
+        def _clears_bar(model_id: str) -> bool:
+            candidates = dynamic_reachable.get(model_id)
+            if candidates is None:
+                target = aliases[model_id] if model_id in aliases else model_id
+                candidates = [normalize_pricing_key(config, target)]
+            return any(
+                is_sovereign_enough(
+                    sovereignty_map,
+                    candidate.partition(":")[0],
+                    candidate.partition(":")[2],
+                    required_level,
+                )[0]
+                for candidate in candidates
+            )
+
+        merged = {mid: obj for mid, obj in merged.items() if _clears_bar(mid)}
 
     sorted_models = sorted(merged.values(), key=lambda m: m.id)
     return ModelListResponse(data=sorted_models)

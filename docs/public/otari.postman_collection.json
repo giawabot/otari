@@ -2360,9 +2360,15 @@
                   "disabled": true,
                   "key": "provider",
                   "value": ""
+                },
+                {
+                  "description": "Filter the catalog to models that clear a residency bar: 'canadian' (level 2+), 'sovereign' (level 3+), 'sovereign_model' (level 4).",
+                  "disabled": true,
+                  "key": "residency",
+                  "value": ""
                 }
               ],
-              "raw": "{{baseUrl}}/api/v1/models?provider="
+              "raw": "{{baseUrl}}/api/v1/models?provider=&residency="
             }
           }
         },

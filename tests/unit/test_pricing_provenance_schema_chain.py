@@ -181,8 +181,12 @@ def test_the_revision_round_trips(sqlite_at_head: tuple[Config, Engine]) -> None
 
     columns = _columns(engine)
     assert set(_EXPECTED_TYPES) <= set(columns)
-    with Session(engine) as session:
-        row = session.get(UsageLog, "settled-1")
-    assert row is not None
+    with engine.connect() as connection:
+        # Raw SQL again: the database is pinned at the provenance revision,
+        # which predates columns the current model declares (residency_audit),
+        # so the mapped class cannot read this schema.
+        row = connection.execute(
+            text("SELECT pricing_source, pricing_reference, pricing_version FROM usage_logs WHERE id = 'settled-1'")
+        ).one()
     # The provenance went with the columns; nothing backfills it.
-    assert all(getattr(row, name) is None for name in _EXPECTED_TYPES)
+    assert all(value is None for value in row)

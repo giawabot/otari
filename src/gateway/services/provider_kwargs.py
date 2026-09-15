@@ -44,7 +44,7 @@ from gateway.services.tenancy.org_provider_key_service import cached_org_provide
 
 # Keys that describe an instance to otari but are not credentials any-llm
 # understands, so they must be stripped before the provider call.
-_INSTANCE_META_KEYS = ("provider_type", "models")
+_INSTANCE_META_KEYS = ("provider_type", "models", "sovereignty")
 
 # any-llm rejects a keyless call to most providers (openai, anthropic, ...) with
 # MissingApiKeyError, but a self-hosted OpenAI-/Anthropic-compatible backend

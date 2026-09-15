@@ -5942,6 +5942,11 @@ export interface components {
              * @default auto
              */
             reasoning_effort: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto") | null;
+            /**
+             * Residency
+             * @description Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
+             */
+            residency?: string | null;
             /** Response Format */
             response_format?: {
                 [key: string]: unknown;
@@ -7768,6 +7773,11 @@ export interface components {
             } | null;
             /** Prompt Cache Key */
             prompt_cache_key?: string | null;
+            /**
+             * Residency
+             * @description Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
+             */
+            residency?: string | null;
             /** Service Tier */
             service_tier?: string | null;
             /**
@@ -9880,6 +9890,11 @@ export interface components {
             reasoning?: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * Residency
+             * @description Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
+             */
+            residency?: string | null;
             /** Response Format */
             response_format?: {
                 [key: string]: unknown;
@@ -11010,6 +11025,10 @@ export interface components {
             provider: string | null;
             /** Request Group Id */
             request_group_id?: string | null;
+            /** Residency Audit */
+            residency_audit?: {
+                [key: string]: unknown;
+            } | null;
             /** Selection Reason */
             selection_reason?: string | null;
             /** Source */
@@ -14374,6 +14393,8 @@ export interface operations {
             query?: {
                 /** @description Filter models by provider name */
                 provider?: string | null;
+                /** @description Filter the catalog to models that clear a residency bar: 'canadian' (level 2+), 'sovereign' (level 3+), 'sovereign_model' (level 4). */
+                residency?: string | null;
             };
             header?: never;
             path?: never;

@@ -51,7 +51,12 @@ from gateway.api.routes._platform import (
     _extract_platform_user_token,
     _resolve_platform_credentials,
 )
-from gateway.api.routes._schema_derive import SESSION_LABEL_DESC, SESSION_LABEL_MAX_LENGTH, derive_request_base
+from gateway.api.routes._schema_derive import (
+    RESIDENCY_DESC,
+    SESSION_LABEL_DESC,
+    SESSION_LABEL_MAX_LENGTH,
+    derive_request_base,
+)
 from gateway.api.routes._tools import _strip_gateway_fields
 from gateway.core.config import GatewayConfig
 from gateway.core.usage import GatewayUsage
@@ -129,6 +134,9 @@ class MessagesRequest(derive_request_base(MessagesParams)):  # type: ignore[misc
     tools_header: str | None = None
     max_tool_iterations: int | None = Field(default=None, ge=1, le=MAX_TOOL_ITERATIONS_CAP)
     session_label: str | None = Field(default=None, max_length=SESSION_LABEL_MAX_LENGTH, description=SESSION_LABEL_DESC)
+    # Gateway-internal residency bar (NorthRouter). Stripped before the
+    # provider call; enforced in the routing pipeline.
+    residency: str | None = Field(default=None, max_length=32, description=RESIDENCY_DESC)
 
 
 class CountTokensRequest(BaseModel):
@@ -695,6 +703,7 @@ async def create_message(
             routing_signal=lambda: routing_signal_from_messages(
                 request.messages, raw_request, has_tools=bool(request.tools)
             ),
+            residency=request.residency,
             normalize_messages=_normalize,
         )
     except HTTPException as exc:
