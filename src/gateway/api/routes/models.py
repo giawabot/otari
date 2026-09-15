@@ -11,6 +11,7 @@ from gateway.api.deps import (
     HostedProviderServiceDep,
     OrgProviderKeyServiceDep,
     RequestSessionModelProviderPortDep,
+    UnitOfWorkDep,
     get_config,
     get_db,
     get_session_identity,
@@ -19,6 +20,7 @@ from gateway.api.deps import (
 )
 from gateway.core.config import GatewayConfig
 from gateway.core.surface import Surface
+from gateway.core.unit_of_work import UnitOfWork
 from gateway.models.api_keys import APIKey
 from gateway.models.tenancy import User as TenancyUser
 from gateway.ports.model_provider_port import ModelProviderPort
@@ -58,6 +60,7 @@ from gateway.services.model_discovery_service import (
 from gateway.services.pricing_service import latest_price_version
 from gateway.services.provider_kwargs import normalize_pricing_key
 from gateway.services.selector_index_service import answered_by_listing, models_by_identity
+from gateway.services.sovereignty import SovereigntyService
 from gateway.services.tenancy import OrgProviderKeyService
 
 if TYPE_CHECKING:
@@ -193,6 +196,7 @@ def _to_metadata_schema(entry: ModelCatalogEntry) -> ModelMetadata:
 @catalog_router.get("/models", response_model_exclude_none=True)
 async def list_models(
     db: Annotated[AsyncSession, Depends(get_db)],
+    uow: UnitOfWorkDep,
     config: Annotated[GatewayConfig, Depends(get_config)],
     auth: Annotated[tuple[APIKey | None, bool], Depends(verify_catalog_reader)],
     session_identity: Annotated[TenancyUser | None, Depends(get_session_identity)],
@@ -200,6 +204,14 @@ async def list_models(
     org_provider_keys: OrgProviderKeyServiceDep,
     provider: Annotated[
         str | None, Query(description="Only the models this provider instance serves, described as served there.")
+    ] = None,
+    residency: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Filter models by residency: canadian (level 2+), sovereign (level 3+), or sovereign_model (level 4)."
+            )
+        ),
     ] = None,
     workspace_id: Annotated[
         uuid.UUID | None,
@@ -221,12 +233,14 @@ async def list_models(
     return ModelListResponse(
         data=await _listing(
             db,
+            uow,
             config,
             auth,
             session_identity,
             model_provider,
             org_provider_keys,
             provider=provider,
+            residency=residency,
             workspace_id=workspace_id,
         )
     )
@@ -234,6 +248,7 @@ async def list_models(
 
 async def _listing(
     db: AsyncSession,
+    uow: UnitOfWork,
     config: GatewayConfig,
     auth: tuple[APIKey | None, bool],
     session_identity: TenancyUser | None,
@@ -241,6 +256,7 @@ async def _listing(
     org_provider_keys: OrgProviderKeyService,
     *,
     provider: str | None = None,
+    residency: str | None = None,
     workspace_id: uuid.UUID | None = None,
 ) -> list[ModelObject]:
     # Alias targets are kept so a model's row is chosen among the offerings a
@@ -257,6 +273,34 @@ async def _listing(
     )
     models = list(catalog.models.values())
     organization_id = await viewer_organization(db, auth, session_identity)
+    if residency is not None:
+        try:
+            required_level = SovereigntyService.parse_bar(residency)
+        except ValueError as exc:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+        rows = await SovereigntyService.attestations(uow, organization_id=organization_id)
+        sovereignty_map = SovereigntyService.map_for(config, rows)
+        dynamic_reachable = {
+            name: [normalize_pricing_key(config, selector) for selector in spec.static_selectors()]
+            for name, spec in catalog.dynamic_policies.items()
+        }
+
+        def _clears_bar(model_id: str) -> bool:
+            candidates = dynamic_reachable.get(model_id)
+            if candidates is None:
+                target = catalog.aliases.get(model_id, model_id)
+                candidates = [normalize_pricing_key(config, target)]
+            return any(
+                SovereigntyService.is_enough(
+                    sovereignty_map,
+                    (parts := candidate.partition(":"))[0],
+                    parts[2] if parts[1] else None,
+                    required_level,
+                )[0]
+                for candidate in candidates
+            )
+
+        models = [model for model in models if _clears_bar(model.id)]
     await apply_organization_pricing(db, config, models, catalog.aliases, organization_id)
     slug_providers = await org_provider_keys.slug_providers(organization_id) if organization_id is not None else {}
     return models_by_identity(
@@ -352,6 +396,7 @@ async def list_model_metadata(
 async def get_model(
     model_id: str,
     db: Annotated[AsyncSession, Depends(get_db)],
+    uow: UnitOfWorkDep,
     config: Annotated[GatewayConfig, Depends(get_config)],
     auth: Annotated[tuple[APIKey | None, bool], Depends(verify_catalog_reader)],
     session_identity: Annotated[TenancyUser | None, Depends(get_session_identity)],
@@ -364,7 +409,7 @@ async def get_model(
     """
     scope, aliases = await _caller_scope(db, config, auth, session_identity, model_provider)
     if answered_by_listing(model_id, aliases):
-        listed = await _listing(db, config, auth, session_identity, model_provider, org_provider_keys)
+        listed = await _listing(db, uow, config, auth, session_identity, model_provider, org_provider_keys)
         found = next((obj for obj in listed if obj.id == model_id), None)
         if found is not None:
             return found

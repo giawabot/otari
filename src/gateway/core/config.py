@@ -2031,8 +2031,28 @@ class GatewayConfig(
             if messages_api is not None and messages_api not in MESSAGES_API_VALUES:
                 msg = f"providers.{instance}.messages_api must be one of: {', '.join(MESSAGES_API_VALUES)}."
                 raise ValueError(msg)
+            sovereignty = entry.get("sovereignty")
+            if sovereignty is not None:
+                self._validate_provider_sovereignty(instance, sovereignty)
             if not entry:
                 self._warn_on_uncredentialed_bare_entry(instance)
+
+    @staticmethod
+    def _validate_provider_sovereignty(instance: str, sovereignty: Any) -> None:
+        """Validate a ``providers.<instance>.sovereignty`` block at startup."""
+        if not isinstance(sovereignty, dict):
+            msg = f"providers.{instance}.sovereignty must be a mapping."
+            raise ValueError(msg)
+        level = sovereignty.get("level")
+        if not isinstance(level, int) or isinstance(level, bool) or not 1 <= level <= 4:
+            msg = f"providers.{instance}.sovereignty.level must be an int 1-4, got {level!r}."
+            raise ValueError(msg)
+        if not sovereignty.get("hosted_in") or not sovereignty.get("operator_jurisdiction"):
+            msg = (
+                f"providers.{instance}.sovereignty must declare hosted_in and operator_jurisdiction "
+                "alongside the level."
+            )
+            raise ValueError(msg)
 
     def validate_hosted_providers(self) -> None:
         """Validate the ``hosted_providers:`` block at startup so a misconfigured entry fails fast.

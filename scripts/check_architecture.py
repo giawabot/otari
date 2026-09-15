@@ -2446,6 +2446,10 @@ MODEL_ACCESS: dict[str, ModelAccess] = {
         "repository": "gateway/repositories/traces/break_glass_repository.py",
         "baseline": (),
     },
+    "gateway.models.sovereignty.ProviderSovereignty": {
+        "repository": "gateway/repositories/sovereignty/sovereignty_repository.py",
+        "baseline": (),
+    },
     "gateway.models.usage.AgentTelemetry": {
         "repository": None,
         "baseline": ("gateway/adapters/telemetry_storage_adapter.py",),

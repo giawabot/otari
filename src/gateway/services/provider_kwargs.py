@@ -72,7 +72,7 @@ if TYPE_CHECKING:
 
 # Keys that describe an instance to otari but are not credentials any-llm
 # understands, so they must be stripped before the provider call.
-_INSTANCE_META_KEYS = ("provider_type", "models", "max_retries", "messages_api", "request_fields")
+_INSTANCE_META_KEYS = ("provider_type", "models", "max_retries", "messages_api", "request_fields", "sovereignty")
 
 # How long a Bedrock client waits for the next byte of a response. botocore's
 # default of 60s fails a stream whose model goes quiet for a minute, which a model

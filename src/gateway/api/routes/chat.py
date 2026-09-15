@@ -43,7 +43,12 @@ from gateway.api.routes._pipeline import (
     scope_prompt_cache_key,
 )
 from gateway.api.routes._request_tags import RequestMetadata, RequestTagsHeader, resolved_tags
-from gateway.api.routes._schema_derive import SESSION_LABEL_DESC, SESSION_LABEL_MAX_LENGTH, derive_request_base
+from gateway.api.routes._schema_derive import (
+    RESIDENCY_DESC,
+    SESSION_LABEL_DESC,
+    SESSION_LABEL_MAX_LENGTH,
+    derive_request_base,
+)
 from gateway.api.routes._tools import _strip_gateway_fields
 from gateway.core.config import GatewayConfig
 from gateway.core.error_codes import ErrorKind
@@ -187,6 +192,8 @@ class ChatCompletionRequest(derive_request_base(CompletionParams)):  # type: ign
     # OpenAI's chat field, absent from ``CompletionParams``: read for request tags
     # and never forwarded, since a provider other than OpenAI would reject it.
     metadata: RequestMetadata = None
+    # Gateway-internal residency bar; enforced before dispatch and never forwarded.
+    residency: str | None = Field(default=None, max_length=32, description=RESIDENCY_DESC)
 
     @model_validator(mode="wrap")
     @classmethod
@@ -635,6 +642,7 @@ async def run_chat_completion(
             session_principal=session_principal,
             streaming=bool(request.stream),
             routing_signal=lambda: routing_signal(raw_request),
+            residency=request.residency,
             normalize_messages=_normalize,
             tools=request.tools,
             code_execution_policies=tool_ports.code_execution_policy,
