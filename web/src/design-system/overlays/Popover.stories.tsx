@@ -20,7 +20,9 @@ import { Popover } from "./Popover"
 const meta = {
   title: "Design system/Overlays/Popover",
   component: Popover,
-  args: { trigger: null, children: null },
+  // Placeholders: every story renders its own `Popover`, so these only satisfy
+  // the required props on the meta.
+  args: { trigger: <Button>Open</Button>, children: null, label: "Popover" },
   parameters: { layout: "centered" },
 } satisfies Meta<typeof Popover>
 
@@ -31,7 +33,7 @@ type Story = StoryObj<typeof meta>
 /** Uncontrolled: the trigger opens it, Escape and an outside click close it. */
 export const Default: Story = {
   render: () => (
-    <Popover trigger={<Button>Columns</Button>}>
+    <Popover label="Visible columns" trigger={<Button>Columns</Button>}>
       <div className="flex flex-col gap-2 p-1">
         <span className="text-overline">Visible columns</span>
         <Checkbox isSelected onChange={() => {}}>
@@ -53,6 +55,7 @@ export const Placements: Story = {
     <div className="grid grid-cols-2 gap-8 p-12">
       {(["top", "bottom", "left", "right"] as const).map((placement) => (
         <Popover
+          label={`Placement ${placement}`}
           key={placement}
           placement={placement}
           trigger={<Button>{placement}</Button>}
@@ -73,6 +76,7 @@ export const Controlled: Story = {
     const [isOpen, setIsOpen] = useState(false)
     return (
       <Popover
+        label="Reassign workspace"
         isOpen={isOpen}
         onOpenChange={setIsOpen}
         trigger={<Button>Reassign workspace</Button>}
@@ -86,4 +90,25 @@ export const Controlled: Story = {
       </Popover>
     )
   },
+}
+
+export const Sectioned: Story = {
+  render: () => (
+    <Popover
+      label="History"
+      padding="none"
+      placement="bottom end"
+      trigger={<Button>History</Button>}
+    >
+      <div className="w-72 max-w-[calc(100vw-2rem)]">
+        <h2 className="border-b border-border px-4 py-3 text-heading">
+          History
+        </h2>
+        <p className="px-4 py-3 text-body">Recent activity appears here.</p>
+        <div className="border-t border-border px-4 py-3">
+          <Button size="sm">View all</Button>
+        </div>
+      </div>
+    </Popover>
+  ),
 }

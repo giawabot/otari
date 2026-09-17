@@ -28,6 +28,9 @@ interface MockOpts {
   catalog?: { id: string; name: string }[]
   // Refuse the create, so a test can read what a refusal leaves behind.
   createFails?: boolean
+  // Refuse the catalog read, which is what a deployment that still gates it on
+  // the operator does to this page's audience.
+  catalogFails?: boolean
 }
 
 function mockApi(opts: MockOpts = {}) {
@@ -61,6 +64,9 @@ function mockApi(opts: MockOpts = {}) {
       return jsonResponse({ detail: "Not authorized" }, 403)
     }
     if (url.includes(`${API_ROOT}/providers/catalog`)) {
+      if (opts.catalogFails) {
+        return jsonResponse({ detail: "Not authorized" }, 403)
+      }
       return jsonResponse(
         opts.catalog ?? [{ id: "anthropic", name: "Anthropic" }],
       )
@@ -95,6 +101,58 @@ describe("OrganizationProviderKeysPage", () => {
     await user.click(trigger)
     await screen.findByRole("dialog", { name: "New provider key" })
     expect(trigger).toBeInTheDocument()
+  })
+
+  it("marks a key the deployment cannot decrypt and says how to fix it", async () => {
+    // Every other signal on the row reads normal: the key is stored, it has a
+    // last4, nothing disabled it. What is wrong is that the ciphertext no longer
+    // decrypts, so it serves nothing and its models leave the catalog. Without
+    // this the page is indistinguishable from a working one.
+    mockApi({ keys: [orgProviderKey({ name: "Production", usable: false })] })
+    renderPage(<OrganizationProviderKeysPage />)
+
+    expect(await screen.findByText("UNREADABLE")).toBeInTheDocument()
+    expect(
+      screen.getByText(/can't be decrypted on this deployment/i),
+    ).toBeInTheDocument()
+    expect(screen.getByText(/Re-enter the API key/i)).toBeInTheDocument()
+  })
+
+  it("says nothing about decryption when every key is readable", async () => {
+    mockApi({ keys: [orgProviderKey({ name: "Production" })] })
+    renderPage(<OrganizationProviderKeysPage />)
+
+    await screen.findByText("Production")
+    expect(screen.queryByText("UNREADABLE")).not.toBeInTheDocument()
+    expect(
+      screen.queryByText(/can't be decrypted on this deployment/i),
+    ).not.toBeInTheDocument()
+  })
+
+  it("says the provider catalog failed rather than that there are no providers", async () => {
+    // A refused read leaves the query with no data, which is the same empty
+    // array a deployment with no providers would give. Reported as "No provider
+    // to offer here.", it read as a deployment with nothing to offer, and the
+    // real cause (the catalog sat behind the deployment-operator gate, which
+    // this page's owners and admins do not pass) was invisible from the form.
+    mockApi({ catalogFails: true })
+    const user = userEvent.setup()
+    renderPage(<OrganizationProviderKeysPage />)
+
+    await user.click(
+      await screen.findByRole("button", { name: "Add provider key" }),
+    )
+    const dialog = await screen.findByRole("dialog", {
+      name: "New provider key",
+    })
+    await user.click(within(dialog).getByRole("combobox", { name: "Provider" }))
+
+    expect(
+      await screen.findByText(/catalog could not be loaded/i),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByText("No provider to offer here."),
+    ).not.toBeInTheDocument()
   })
 
   it("opens on a blank draft after a create", async () => {

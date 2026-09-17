@@ -1,6 +1,8 @@
+import json
 import logging
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -10,9 +12,8 @@ import click
 import uvicorn
 from uvicorn.config import logger
 
-from gateway.core.config import API_ROOT, load_config
+from gateway.core.config import API_KEY_HEADER, API_ROOT, load_config
 from gateway.log_config import setup_logger
-from gateway.main import create_app
 
 _LOG_LEVEL_NAMES: dict[str, int] = {
     "DEBUG": logging.DEBUG,
@@ -34,8 +35,7 @@ def _parse_log_level(ctx: click.Context, param: click.Parameter, value: str | No
         return int(normalized)
     choices = ", ".join(_LOG_LEVEL_NAMES)
     raise click.BadParameter(
-        f"{value!r} is not a valid log level. Choose one of {choices} (case-insensitive) "
-        "or a numeric level such as 20."
+        f"{value!r} is not a valid log level. Choose one of {choices} (case-insensitive) or a numeric level such as 20."
     )
 
 
@@ -88,6 +88,8 @@ def serve(
     log_level: int,
 ) -> None:
     """Start the Otari server."""
+    from gateway.main import create_app
+
     if workers > 1:
         raise click.ClickException(
             "Otari does not support running more than one worker process yet. "
@@ -227,6 +229,443 @@ def gen_secret_key() -> None:
     click.echo(generate_secret_key())
 
 
+# Claude Code's own edit tools and the tool_input field naming their target.
+_HOOK_EDIT_TOOL_PATH_FIELDS = {"Edit": "file_path", "Write": "file_path", "NotebookEdit": "notebook_path"}
+
+# Claude Code's shell tool and the tool_input field naming the command it is
+# about to run. A PreToolUse call for this tool is the only evidence a
+# command_match gate gets before the command runs; see docs/agent-gates.md.
+_HOOK_COMMAND_TOOL_FIELDS = {"Bash": "command"}
+
+# Mirrors the Hook Server's own per-command bound (routes/hooks.py's
+# _MAX_COMMAND_LENGTH). A literal rather than an import: this command talks to
+# a gateway over HTTP that may be a different build, so the number it truncates
+# to is its own best guess at the far side's limit, not a shared constant that
+# would imply the two are always one process.
+_HOOK_MAX_COMMAND_LENGTH = 4096
+
+
+def _hook_find_repo_root(start: Path) -> Path | None:
+    current = start.resolve()
+    for candidate in (current, *current.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _hook_collect_changed_paths(repo_root: Path) -> list[str] | None:
+    """Evidence for a `changed_path` gate on a Stop event: what Git sees changed.
+
+    Claude Code's Stop payload carries no file list of its own (unlike
+    PreToolUse, whose tool_input already names a target), so a Stop-time
+    changed_path check has nothing to evaluate unless something goes and
+    finds out what changed. Git status is that something: harness-agnostic
+    (the same command regardless of which tool wrote the change, unlike
+    parsing Claude Code's own transcript format) and ground truth for the
+    working tree, including a change a `Bash` call made that no tool_input
+    ever named. Specific to changed_path: a future gate type collects its
+    own evidence in its own way, not through this function.
+    """
+    result = subprocess.run(  # noqa: S603 - fixed argv, no shell, explicit cwd
+        ["git", "status", "--porcelain=v1", "-z", "--untracked-files=all"],
+        cwd=repo_root,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",  # not the platform locale default, which is not always UTF-8
+        timeout=10,
+        check=False,
+    )
+    if result.returncode != 0:
+        return None
+    # -z: NUL-delimited and never quotes or octal-escapes a path (unlike the
+    # human-readable format, which renders a non-ASCII name like "café.txt"
+    # as the escaped "caf\303\251.txt" and would report an untracked file
+    # literally named "weird -> name.txt" as a rename by matching " -> " as
+    # a substring of the one path it has, rather than the separator between
+    # two). A rename or copy (status X or Y is 'R'/'C') is two consecutive
+    # tokens, new path then old path, not one token with an arrow in it.
+    tokens = result.stdout.split("\0")
+    paths = []
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if not token:
+            index += 1
+            continue
+        status, path = token[:2], token[3:]
+        paths.append(path)
+        index += 2 if ("R" in status or "C" in status) else 1
+    return paths
+
+
+@cli.group(name="hook", invoke_without_command=True)
+@click.option(
+    "--harness",
+    type=click.Choice(["claude-code"]),
+    default="claude-code",
+    show_default=True,
+    help="Agent integration sending this callback.",
+)
+@click.option(
+    "--config",
+    "-c",
+    type=click.Path(exists=True, dir_okay=False),
+    default=None,
+    help="Path to config YAML file, used to resolve --url/--api-key when they are not given.",
+)
+@click.option("--url", envvar="OTARI_URL", default=None, help="Base URL of the Otari gateway.")
+@click.option("--api-key", envvar="OTARI_API_KEY", default=None, help="Credential for the Hook Server.")
+@click.pass_context
+def hook(ctx: click.Context, harness: str, config: str | None, url: str | None, api_key: str | None) -> None:
+    """Native callback entry point for a supported agent's hook protocol.
+
+    Reads one JSON hook payload on stdin, collects the evidence that payload
+    carries (a PreToolUse call's own target path, or a Stop event's Git
+    status), and calls POST /api/v1/hooks/check. Never reads or evaluates the
+    policy itself: gateway.agent_runtime does that; this command is a thin,
+    harness-specific transport. See docs/agent-gates.md.
+
+    Exit code is this harness's own protocol, not otari policy check's:
+    Claude Code's PreToolUse and Stop hooks both take 0 (proceed) or 2 (block,
+    stderr shown to the agent). Never blocks on a problem that is not a
+    required gate failing: a missing policy, an unreachable gateway, or a
+    missing credential all exit 0, with a message on stderr where there is
+    one worth surfacing.
+
+    A group, not a plain command, so `otari hook setup` can live alongside
+    it: invoked with no subcommand (the shape every existing settings file
+    already calls), it runs the callback above unchanged.
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+    import httpx
+
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        return
+
+    event = payload.get("hook_event_name")
+    repo = Path(payload.get("cwd") or Path.cwd())
+    root = _hook_find_repo_root(repo)
+    if root is None:
+        return
+
+    gates_file = root / ".otari-gates.yml"
+    if not gates_file.is_file():
+        return
+
+    changed_paths: list[str] = []
+    commands: list[str] = []
+    if event == "PreToolUse":
+        tool_name = payload.get("tool_name", "")
+        tool_input = payload.get("tool_input") or {}
+        # A tool call is either an edit or a shell command, never both, so at
+        # most one of these evidence lists is ever populated per call.
+        path_field = _HOOK_EDIT_TOOL_PATH_FIELDS.get(tool_name)
+        command_field = _HOOK_COMMAND_TOOL_FIELDS.get(tool_name)
+        if path_field:
+            target = tool_input.get(path_field)
+            if not target:
+                return
+            try:
+                # as_posix(), not str(): a forbidden glob is a repo-relative
+                # POSIX path and the evaluator splits it on "/", so a
+                # WindowsPath's native "docs\\foo.md" spelling matches
+                # nothing. That fails open and silently, a passing gate being
+                # indistinguishable from no forbidden change, so every
+                # PreToolUse gate would pass on Windows.
+                changed_paths = [Path(target).resolve().relative_to(root).as_posix()]
+            except ValueError:
+                return  # Outside the repo: nothing this policy can name.
+        elif command_field:
+            command = tool_input.get(command_field)
+            if not command:
+                return
+            # Truncated rather than sent whole: the Hook Server rejects an
+            # oversize command with a 422, and a 422 fails the *whole* check
+            # open, taking every changed_path gate in the same policy with it.
+            # A Bash call carrying a heredoc clears this limit routinely, so
+            # that is the common case rather than a pathological one. A tool
+            # name is argv[0], so keeping the head is what preserves detection
+            # for the shape this gate is actually for.
+            if len(command) > _HOOK_MAX_COMMAND_LENGTH:
+                click.echo(
+                    f"otari hook: command is {len(command):,} characters, checking only the first "
+                    f"{_HOOK_MAX_COMMAND_LENGTH:,}.",
+                    err=True,
+                )
+                command = command[:_HOOK_MAX_COMMAND_LENGTH]
+            commands = [command]
+        else:
+            return  # A tool this harness integration does not check yet.
+    elif event == "Stop":
+        collected = _hook_collect_changed_paths(root)
+        if collected is None:
+            click.echo("otari hook: could not read Git state, not blocking.", err=True)
+            return
+        changed_paths = collected
+    else:
+        return  # An event this harness integration does not check yet.
+
+    try:
+        gateway_config = load_config(config)
+    except ValueError as exc:
+        # load_config runs GatewayConfig.validate_mode_selection(), which
+        # raises on a real misconfiguration (e.g. OTARI_MODE=hybrid with no
+        # OTARI_AI_TOKEN). That is a setup problem, not a required gate
+        # failing, so it falls under this command's own fail-open contract.
+        click.echo(f"otari hook: could not load config ({exc}), not blocking.", err=True)
+        return
+    # host is a bind address (0.0.0.0 is the documented default), not a connect
+    # target; a client dials localhost instead.
+    connect_host = "localhost" if gateway_config.host == "0.0.0.0" else gateway_config.host  # noqa: S104
+    resolved_url = url or f"http://{connect_host}:{gateway_config.port}"
+    resolved_key = api_key or gateway_config.master_key
+    if not resolved_key:
+        click.echo("otari hook: no API key or master key resolved, not blocking.", err=True)
+        return
+
+    try:
+        response = httpx.post(
+            f"{resolved_url.rstrip('/')}{API_ROOT}/hooks/check",
+            json={
+                "policy_yaml": gates_file.read_text(encoding="utf-8"),
+                "changed_paths": changed_paths,
+                "commands": commands,
+            },
+            headers={API_KEY_HEADER: resolved_key},
+            timeout=15.0,
+        )
+        response.raise_for_status()
+        result = response.json()
+        failing = [gate for gate in result["results"] if gate["outcome"] not in ("pass", "not_applicable")]
+        blocked = result["blocked"]
+    except httpx.HTTPStatusError as exc:
+        # Split from the transport branch below on purpose: the request did
+        # arrive and was answered, so "could not reach" would send whoever
+        # debugs this to the network instead of to the status and body that
+        # say what was actually wrong (a policy this build cannot parse, or
+        # evidence over one of the route's limits).
+        detail = exc.response.text[:500]
+        click.echo(
+            f"otari hook: {resolved_url} rejected the check ({exc.response.status_code}: {detail}), not blocking.",
+            err=True,
+        )
+        return
+    except httpx.HTTPError as exc:
+        click.echo(f"otari hook: could not reach {resolved_url} ({exc}), not blocking.", err=True)
+        return
+    except (ValueError, TypeError, KeyError) as exc:
+        # A body that is not JSON, or is JSON of a shape this command does not
+        # recognize. Same fail-open contract as an unreachable gateway: this
+        # command blocks on a required gate failing and on nothing else, so a
+        # response it cannot read must not surface as a traceback.
+        click.echo(f"otari hook: unreadable response from {resolved_url} ({exc!r}), not blocking.", err=True)
+        return
+
+    # `failing` mirrors Outcome's own non-blocking set (types.py), not just
+    # "pass": a future gate type's not_applicable is a clean result too, and
+    # must not get reported here as something the caller needs to look at.
+    if not failing:
+        return
+
+    # .get(), not [...]: the try/except above only protects the shape checks
+    # that build `failing` itself (result["results"], gate["outcome"]), not a
+    # gate dict's other fields. A gate missing 'enforcement'/'gate_id'/
+    # 'message' (an older or otherwise mismatched otari serve behind --url)
+    # must not raise KeyError here, outside that protection, and surface as a
+    # traceback in place of the fail-open message this command promises.
+    summary = "\n".join(
+        f"  [{'x' if gate.get('enforcement') == 'required' else '!'}] "
+        f"{gate.get('gate_id', '?')}: {gate.get('message', '(no message)')}"
+        for gate in failing
+    )
+    if blocked:
+        click.echo(f"otari hook: blocked ({harness}, {event}):\n{summary}", err=True)
+        raise SystemExit(2)
+    # An advisory gate failed but nothing required did: warn without
+    # blocking. Checking `blocked` alone here would silently drop this,
+    # since only a required failure can ever set it true. Exit 0 with a
+    # plain stderr message is invisible to the user: Claude Code only
+    # surfaces a non-blocking hook's stderr in its own debug log, never in
+    # the transcript or to the model. `systemMessage` on stdout is the
+    # documented field for a visible, non-blocking hook message.
+    click.echo(json.dumps({"systemMessage": f"otari hook: advisory warning(s) ({harness}, {event}):\n{summary}"}))
+
+
+def _otari_binary_path() -> str:
+    """Absolute path to this otari install's own binary.
+
+    Claude Code's hook subprocess does not inherit an activated shell's PATH,
+    so a bare "otari" often will not resolve. otari's own console-script
+    wrapper sits next to the interpreter running it (same venv/bin), which is
+    what sys.executable already names.
+    """
+    return str(Path(sys.executable).with_name("otari"))
+
+
+def _resolve_hook_credential() -> str | None:
+    """Whatever `otari hook` would resolve automatically at runtime, no flags given."""
+    try:
+        return load_config(None).master_key
+    except ValueError:
+        return None
+
+
+def _gates_file_allows_bash(gates_file: Path) -> bool:
+    """Whether the matcher should include Bash: only if a command_match gate exists.
+
+    Parses gates_file the same way the Hook Server does. A missing or
+    unparseable policy defaults to False, the narrower matcher: setup cannot
+    know what a broken policy would have wanted, and the round trip is
+    otherwise harmless but pointless to pay for nothing.
+    """
+    if not gates_file.is_file():
+        return False
+    from gateway.agent_runtime.domain.policy import PolicyError, parse_policy
+    from gateway.agent_runtime.domain.types import CommandMatchGate
+
+    try:
+        spec = parse_policy(gates_file.read_text(encoding="utf-8"), source=str(gates_file))
+    except PolicyError:
+        return False
+    return any(isinstance(gate, CommandMatchGate) for gate in spec.gates)
+
+
+def _starter_gates_yaml(repo_name: str) -> str:
+    return (
+        'schema_version: "1.0"\n'
+        "policy:\n"
+        f"  id: {repo_name}/gates\n"
+        "  description: Rules this repo checks on its own working tree.\n"
+        "\n"
+        "gates:\n"
+        "  - id: no-force-push\n"
+        "    type: command_match\n"
+        "    enforcement: advisory\n"
+        '    forbidden: ["git push --force"]\n'
+        "    message: >-\n"
+        "      Force-pushing rewrites shared history. Use --force-with-lease\n"
+        "      if you must.\n"
+    )
+
+
+def _merge_pretooluse_hook(settings_path: Path, matcher: str, command: str) -> bool:
+    """Add or update a PreToolUse hook entry pointing at otari hook.
+
+    Returns True if a new entry was appended, False if an existing one was
+    found (by its command already starting with this same otari binary
+    invoked as "hook", whatever flags it had) and updated in place instead of
+    duplicated. Every other key in the file, including other hooks and
+    permissions, and any sibling hook command under the same matcher, is
+    preserved untouched.
+    """
+    if settings_path.is_file():
+        try:
+            settings = json.loads(settings_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise click.ClickException(f"{settings_path} is not valid JSON: {exc}") from exc
+        if not isinstance(settings, dict):
+            raise click.ClickException(f"{settings_path} must contain a JSON object at the top level.")
+    else:
+        settings = {}
+
+    hooks_section = settings.setdefault("hooks", {})
+    if not isinstance(hooks_section, dict):
+        raise click.ClickException(f'{settings_path}\'s "hooks" must be a JSON object.')
+    pretooluse = hooks_section.setdefault("PreToolUse", [])
+    if not isinstance(pretooluse, list):
+        raise click.ClickException(f'{settings_path}\'s "hooks.PreToolUse" must be a JSON array.')
+    otari_hook_prefix = command.split(" --", 1)[0]  # "<path> hook", before any flags
+
+    updated = False
+    for entry in pretooluse:
+        if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+            continue
+        for hook_item in entry["hooks"]:
+            existing_command = hook_item.get("command") if isinstance(hook_item, dict) else None
+            if isinstance(existing_command, str) and existing_command.startswith(otari_hook_prefix):
+                entry["matcher"] = matcher
+                hook_item["command"] = command
+                updated = True
+                break
+        if updated:
+            break
+
+    if not updated:
+        pretooluse.append({"matcher": matcher, "hooks": [{"type": "command", "command": command}]})
+
+    settings_path.parent.mkdir(parents=True, exist_ok=True)
+    settings_path.write_text(json.dumps(settings, indent=2) + "\n", encoding="utf-8")
+    return not updated
+
+
+@hook.command(name="setup")
+@click.option(
+    "--harness",
+    type=click.Choice(["claude-code"]),
+    default="claude-code",
+    show_default=True,
+    help="Agent integration to configure.",
+)
+@click.option(
+    "--api-key",
+    default=None,
+    help="Skip automatic/interactive credential resolution and use this.",
+)
+def hook_setup(harness: str, api_key: str | None) -> None:
+    """Register otari hook in a supported agent's own settings.
+
+    Writes or updates a PreToolUse hook entry in .claude/settings.local.json
+    (personal, gitignored, never committed) so registering the Hook Server is
+    not a manual JSON edit. Offers to scaffold a starter .otari-gates.yml
+    when this repo has none yet, and picks the matcher (whether it needs to
+    cover Bash) from whatever gates the policy turns out to have.
+    """
+    root = _hook_find_repo_root(Path.cwd())
+    if root is None:
+        raise click.ClickException("Not inside a Git repository.")
+
+    gates_file = root / ".otari-gates.yml"
+    if not gates_file.is_file():
+        if click.confirm(f"No {gates_file.name} found in {root}. Create a starter policy?", default=True):
+            gates_file.write_text(_starter_gates_yaml(root.name), encoding="utf-8")
+            click.echo(f"Wrote {gates_file}.")
+        else:
+            click.echo(
+                f"Skipping. otari hook will still be registered below, but every gate check "
+                f"passes until {gates_file.name} exists; see docs/agent-gates.md."
+            )
+
+    include_bash = _gates_file_allows_bash(gates_file)
+    matcher = "Edit|Write|NotebookEdit|Bash" if include_bash else "Edit|Write|NotebookEdit"
+
+    embedded_key = api_key
+    if not embedded_key:
+        resolved_key = _resolve_hook_credential()
+        if not resolved_key:
+            click.echo(
+                "Could not resolve a credential automatically (no master_key in config.yml, "
+                ".env, or the environment)."
+            )
+            embedded_key = click.prompt("Enter an Otari API key or master key", hide_input=True)
+        # A key resolved automatically is not embedded: the same resolution
+        # otari hook already does at runtime keeps working, and this repeats
+        # it rather than pinning today's value (e.g. a master key that later
+        # rotates).
+
+    command_parts = [_otari_binary_path(), "hook", "--harness", harness]
+    if embedded_key:
+        command_parts += ["--api-key", embedded_key]
+    command = shlex.join(command_parts)
+
+    settings_path = root / ".claude" / "settings.local.json"
+    created = _merge_pretooluse_hook(settings_path, matcher, command)
+    click.echo(f"{'Added' if created else 'Updated'} the PreToolUse hook in {settings_path}.")
+    click.echo(f"Matcher: {matcher}" + ("" if include_bash else " (add a command_match gate to also cover Bash)"))
+
+
 @cli.group()
 def routing() -> None:
     """Inspect routing policies."""
@@ -302,8 +741,10 @@ def routing_explain(
     if policy_name is None:
         click.echo("Configured policies:")
         for name, listed in cfg.routing.policies.items():
-            shape = f"router:{listed.router_backend}" if listed.router_backend else (
-                "dynamic" if listed.is_dynamic else "static"
+            shape = (
+                f"router:{listed.router_backend}"
+                if listed.router_backend
+                else ("dynamic" if listed.is_dynamic else "static")
             )
             candidates = len(listed.router_candidates) or 1
             click.echo(f"  {name}  ({shape}, {candidates + len(listed.on_failure)} candidate(s))")
@@ -342,12 +783,8 @@ def routing_explain(
     click.echo(f"{policy_name}: {len(plan.attempts)} candidate(s), selected by {plan.selection_reason}")
     for attempt in plan.attempts:
         canonical = f"{attempt.instance}:{attempt.model}"
-        label = (
-            f"weighted {shares[canonical]:.0f}%" if canonical in shares else attempt.selection_reason
-        )
-        click.echo(
-            f"  {attempt.position}. {canonical}    [{label}]  dispatches as {attempt.dispatch_model}"
-        )
+        label = f"weighted {shares[canonical]:.0f}%" if canonical in shares else attempt.selection_reason
+        click.echo(f"  {attempt.position}. {canonical}    [{label}]  dispatches as {attempt.dispatch_model}")
     for dropped in plan.dropped:
         click.echo(f"  x  {dropped.selector}    dropped: {dropped.detail}")
     # Keyed on the backend rather than on the shares: a weighted policy whose whole
@@ -376,9 +813,7 @@ def routing_explain(
     if plan.guardrails:
         click.echo("  guardrails (always enforced):")
         for guardrail in plan.guardrails:
-            click.echo(
-                f"    {guardrail.profile}  mode={guardrail.mode}  on_unavailable={guardrail.on_unavailable}"
-            )
+            click.echo(f"    {guardrail.profile}  mode={guardrail.mode}  on_unavailable={guardrail.on_unavailable}")
     if spec.is_dynamic:
         click.echo(
             "  note: this policy selects per request, so it has no single target or price. It works on "
@@ -569,7 +1004,6 @@ def import_claude_code(
     click.echo(f"Imported {accepted} event(s); {duplicate} already present; {rejected} rejected.")
     if rejected:
         raise SystemExit(1)
-
 
 
 def main() -> None:

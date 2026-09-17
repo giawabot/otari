@@ -1,7 +1,8 @@
-import { Button, Tooltip } from "@heroui/react"
+import { Tooltip } from "@heroui/react"
 import { useEffect, useRef, useState } from "react"
 import { FiCopy } from "react-icons/fi"
 import { copyToClipboard } from "@/design-system/helpers/clipboard"
+import { Button } from "./Button"
 
 // A compact copy control for an identifier an operator has to paste elsewhere (a
 // model id, an alias target). Table rows own click-drag for selection, so the
@@ -73,7 +74,7 @@ export function CopyButton({
         // a 44px row, so no two of these overlap.
         className="relative before:absolute before:-inset-1.5 before:content-['']"
       >
-        <FiCopy aria-hidden="true" className="h-3.5 w-3.5" />
+        <FiCopy aria-hidden className="size-3.5" />
       </Button>
       <Tooltip.Content placement="top" showArrow>
         {state === "failed"

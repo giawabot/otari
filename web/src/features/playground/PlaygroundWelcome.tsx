@@ -1,30 +1,13 @@
 import { Button } from "@/design-system/actions/Button"
-
 import { type ComposerProps, PlaygroundComposer } from "./PlaygroundComposer"
+import { CHAT_COLUMN } from "./playgroundLayout"
 
-/**
- * Starter prompts, for somebody whose first question is "what is this for".
- *
- * Chosen to be answerable by any model rather than to show the gateway off: the
- * point of the screen is that one click produces a reply, which is also the
- * fastest way to find out a provider key is misconfigured.
- */
 const EXAMPLE_PROMPTS = [
-  "Explain how OAuth 2.0 works",
-  "Write a regex that matches an email address",
-  "Draft a polite meeting follow-up",
-  "Suggest five blog post ideas about AI",
+  "Compare two API retry approaches",
+  "Write a Python function with tests",
+  "Summarize an incident",
 ]
 
-/**
- * The empty state before the first question: a greeting, the composer under it,
- * and one-click prompts.
- *
- * The composer is centred here and drops to the bottom once a conversation
- * starts, which is the same control in two positions rather than two controls.
- * A prompt fills the field rather than sending immediately, so a reader can edit
- * it, and so a stray click does not spend money.
- */
 export function PlaygroundWelcome({
   composerProps,
   onSelectPrompt,
@@ -33,27 +16,36 @@ export function PlaygroundWelcome({
   onSelectPrompt: (prompt: string) => void
 }) {
   return (
-    <div className="flex flex-1 flex-col items-center justify-center gap-6 overflow-y-auto px-4 py-8">
-      <h2 className="text-center text-display-sub text-heading">
-        What can I help with?
-      </h2>
-      <div className="flex w-full max-w-3xl flex-col gap-3">
-        <PlaygroundComposer {...composerProps} />
-        {composerProps.canChat ? (
-          <div className="flex flex-wrap justify-center gap-2 pt-1">
-            {EXAMPLE_PROMPTS.map((prompt) => (
-              <Button
-                key={prompt}
-                size="sm"
-                className="rounded-full"
-                onPress={() => onSelectPrompt(prompt)}
-              >
-                {prompt}
-              </Button>
-            ))}
-          </div>
-        ) : null}
+    <div className={`${CHAT_COLUMN} flex flex-1 flex-col gap-7 pt-16 md:pt-36`}>
+      <div className="flex flex-col gap-1.5">
+        <h2 className="text-display-sub">Try a prompt.</h2>
+        <p className="text-base text-muted">
+          Answers, tokens, latency and cost from any model in this workspace.
+        </p>
       </div>
+      <PlaygroundComposer {...composerProps} />
+      {composerProps.canChat ? (
+        <div className="flex flex-col gap-2.5">
+          <p className="text-overline">Starting points</p>
+          <ul className="flex flex-wrap gap-2">
+            {EXAMPLE_PROMPTS.map((prompt) => (
+              <li key={prompt}>
+                <Button
+                  size="sm"
+                  className="min-h-11 whitespace-normal text-left md:min-h-8"
+                  onPress={() => onSelectPrompt(prompt)}
+                >
+                  {prompt}
+                </Button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ) : null}
+      <p className="mt-auto pt-8 text-caption">
+        Runs use the current workspace and count toward its usage. Conversations
+        are stored only when you save.
+      </p>
     </div>
   )
 }

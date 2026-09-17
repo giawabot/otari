@@ -1,28 +1,12 @@
-import { useEffect } from "react"
+import { type ReactNode, useEffect } from "react"
 import type { Decorator } from "@storybook/react-vite"
 
-import { THEME_PREFERENCES } from "@/shared/hooks/useTheme"
+import { THEME_PREFERENCES, ThemeProvider, useTheme } from "@/shared/hooks/useTheme"
 
 /**
- * A light/dark toolbar for the catalog.
- *
- * The dashboard's theme is not a React context that a decorator can just wrap:
- * it is three writes on the document element, and every consumer keys off a
- * different one of them. `globals.css` declares its dark token block under
- * `.dark, [data-theme="dark"]`, its `dark:` variant matches either spelling, and
- * the browser paints scrollbars and native controls from `color-scheme` alone.
- * Set only one and the page half-changes.
- *
- * So this is the third copy of that triple, after `ThemeProvider`
- * (`src/shared/hooks/useTheme.tsx`) and the pre-paint script in `index.html`,
- * which duplicates it because it has to run before React exists. Wrapping the
- * real `ThemeProvider` instead would not work: it reads the operator's stored
- * preference and owns its own state, so a toolbar could not drive it. Keep these
- * three writes in step with that effect.
- *
- * The preference names come from `THEME_PREFERENCES` rather than being restated,
- * minus "system": a catalog exists to show both themes deliberately, and
- * "whatever this laptop is set to" is not a case worth a toolbar entry.
+ * The names come from `THEME_PREFERENCES` rather than being restated, minus
+ * "system": a catalog exists to show both themes deliberately, and "whatever
+ * this laptop is set to" is not a case worth a toolbar entry.
  */
 const THEMES = THEME_PREFERENCES.filter((preference) => preference !== "system")
 
@@ -42,18 +26,35 @@ export const themeGlobalType = {
   },
 }
 
-export const withTheme: Decorator = (Story, context) => {
-  const resolved = context.globals.theme === "dark" ? "dark" : "light"
-
-  // In an effect rather than inline: the target is outside this React tree (the
-  // iframe's own <html>), so writing it during render would be a side effect on
-  // a node React does not own, and the React Compiler is free to re-run a render.
+/**
+ * The toolbar's choice, applied to the context the dashboard itself uses.
+ *
+ * Only when `theme` changes, so a story that owns a theme control
+ * (`LoginPageShell`'s appearance button) wins over the toolbar rather than
+ * being overwritten on its next render. The cost is that re-picking the value
+ * the toolbar already holds does nothing: Storybook raises no update for it, so
+ * after the in-page control has moved the preference, the toolbar restores it
+ * on the other entry rather than the same one. Accepted, for a dev catalog.
+ */
+function StoryTheme({
+  theme,
+  children,
+}: {
+  theme: "light" | "dark"
+  children: ReactNode
+}) {
+  const { setPreference } = useTheme()
   useEffect(() => {
-    const root = document.documentElement
-    root.setAttribute("data-theme", resolved)
-    root.classList.toggle("dark", resolved === "dark")
-    root.style.colorScheme = resolved
-  }, [resolved])
-
-  return <Story />
+    setPreference(theme)
+  }, [theme, setPreference])
+  return children
 }
+
+/** The catalog toolbar, driving the same theme context as the dashboard. */
+export const withTheme: Decorator = (Story, context) => (
+  <ThemeProvider>
+    <StoryTheme theme={context.globals.theme === "dark" ? "dark" : "light"}>
+      <Story />
+    </StoryTheme>
+  </ThemeProvider>
+)

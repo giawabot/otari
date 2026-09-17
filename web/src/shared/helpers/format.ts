@@ -27,6 +27,20 @@ export function formatCost(value: number | null | undefined): string {
   }).format(value)
 }
 
+// A per-million rate, as opposed to a spend. `formatCost` rounds to cents above
+// a cent, which is right for a bill and wrong for a rate: $0.075 per million is
+// a real published rate and "$0.08" is a figure nobody set. Two decimals at
+// least so a whole-dollar rate still reads as money, four at most because no
+// published rate carries a fifth.
+export function formatRate(value: number): string {
+  return new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 4,
+  }).format(value)
+}
+
 // Compact token counts for context windows: 128000 -> "128K", 1000000 -> "1M".
 // Returns an em-dash placeholder when unknown so table cells stay aligned.
 export function formatContext(value: number | null | undefined): string {
@@ -101,6 +115,36 @@ export function formatDateTime(iso: string | null | undefined): string {
     return iso
   }
   return date.toLocaleString()
+}
+
+// The heading a dated row sits under in a history list: "Today", "Yesterday",
+// or the date, with the year only when it is not the current one.
+//
+// `now` is a parameter rather than a `new Date()` read inside, so a list left
+// open across midnight relabels when its caller re-reads the clock instead of
+// keeping yesterday's rows under "Today" until something else rerenders it.
+export function formatDateGroup(
+  iso: string | null | undefined,
+  now: Date = new Date(),
+): string {
+  if (!iso) {
+    return "\u2014"
+  }
+  const date = new Date(iso)
+  if (Number.isNaN(date.getTime())) {
+    return iso
+  }
+  const yesterday = new Date(now)
+  yesterday.setDate(now.getDate() - 1)
+  if (date.toDateString() === now.toDateString()) return "Today"
+  if (date.toDateString() === yesterday.toDateString()) return "Yesterday"
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    ...(date.getFullYear() !== now.getFullYear()
+      ? { year: "numeric" as const }
+      : {}),
+  })
 }
 
 // Compact USD for aggregate tiles: cents precision (not the per-request 4dp that

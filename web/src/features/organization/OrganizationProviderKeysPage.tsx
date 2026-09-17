@@ -289,13 +289,8 @@ export function OrganizationProviderKeysPage() {
   // fired and refused, the way `OrganizationGuardrailsCard` gates its own read
   // and WorkspacesPage withholds the operator-only budget ones.
   //
-  // Deliberately not widened to `isDeploymentOperator`: the server also admits
-  // a superuser whatever their organization role, and `roles.ts` records that
-  // divergence, why it narrows in the safe direction, and that closing it means
-  // growing the membership context a superuser field. `deployment_operator` is
-  // not that field, since it also admits a non-superuser bootstrap identity the
-  // server would refuse, and the rail row is `canManage`-gated too, so no such
-  // caller had a route here to lose.
+  // Not widened to `isDeploymentOperator`: the server gates these rows on the
+  // organization role alone, and operating the deployment grants no role.
   const canEdit = canManage(context.data)
   const keys = useOrgProviderKeys(canEdit)
   // Same gate the `/providers` page applies, for the same reason: without
@@ -333,6 +328,11 @@ export function OrganizationProviderKeysPage() {
   const rows = (keys.data ?? []).filter(
     (key) => showArchived || !key.archived_at,
   )
+  // Archived keys are excluded: one that is out of use is not a problem to
+  // report, and counting it would keep the banner up after the fix.
+  const unreadableCount = (keys.data ?? []).filter(
+    (key) => !key.usable && !key.archived_at,
+  ).length
 
   const columns: DataTableColumn<OrgProviderKey>[] = [
     {
@@ -358,6 +358,17 @@ export function OrganizationProviderKeysPage() {
               ARCHIVED
             </span>
           ) : null}
+          {/* The exception to the rule above, because this one *is* a problem:
+              the credential is stored but this deployment cannot decrypt it, so
+              the key serves nothing and its models are absent from the catalog.
+              Nothing else on the page says so, and the row is otherwise
+              indistinguishable from a working one. */}
+          {row.usable ? null : (
+            <span className="flex items-center gap-2 text-mono-caption text-danger">
+              <Dot className="bg-danger" />
+              UNREADABLE
+            </span>
+          )}
         </div>
       ),
     },
@@ -512,6 +523,22 @@ export function OrganizationProviderKeysPage() {
           <code>OTARI_SECRET_KEY</code> is not set, so provider keys can't be
           encrypted at rest and adding one from the dashboard is disabled. Set
           it on the server and restart.
+        </InfoBanner>
+      ) : null}
+
+      {/* The other half of the same setting: the key is set, and it is not the
+          one these credentials were encrypted under, so nothing here can be
+          decrypted. Worth its own sentence because every other signal on the
+          page reads normal, while the models these providers serve are missing
+          from the catalog entirely. */}
+      {canEdit && secretKeyConfigured && unreadableCount > 0 ? (
+        <InfoBanner tone="warning">
+          {unreadableCount === 1
+            ? "One provider key can't be decrypted on this deployment, so it serves nothing and its models are absent from the catalog."
+            : `${unreadableCount} provider keys can't be decrypted on this deployment, so they serve nothing and their models are absent from the catalog.`}{" "}
+          This happens when <code>OTARI_SECRET_KEY</code> changed since they
+          were stored. Re-enter the API key on each to store it under the
+          current one.
         </InfoBanner>
       ) : null}
 

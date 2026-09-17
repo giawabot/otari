@@ -9,7 +9,8 @@ from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gateway.core.config import API_KEY_HEADER, API_ROOT
-from gateway.models.entities import Budget, User
+from gateway.models.budgets import Budget
+from gateway.models.users import User
 from gateway.services.budget_service import _cas_reset_user_budget, _is_model_free
 
 
@@ -36,6 +37,10 @@ def test_delete_user_rollback_on_commit_failure(
 ) -> None:
     """delete_user rolls back both the API key deactivation and soft-delete on commit failure."""
     client.post(f"{API_ROOT}/users", json={"user_id": "del-fail-user"}, headers=master_key_header)
+    # Provisioned before the patch, for the reason the create-key case below
+    # states: this route resolves the caller's organization now, and first-boot
+    # provisioning commits outside the handler's own rollback.
+    assert client.get(f"{API_ROOT}/organizations/me", headers=master_key_header).status_code == 200
 
     with patch(
         "gateway.api.routes.users.AsyncSession.commit",

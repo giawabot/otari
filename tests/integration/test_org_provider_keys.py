@@ -203,10 +203,10 @@ async def test_plain_member_cannot_list_keys(async_db: AsyncSession) -> None:
         await service.list_keys_for_user(user=member)
 
 
-async def test_superuser_member_may_still_list_keys(async_db: AsyncSession) -> None:
-    """The gate is `require_active_organization_management_access`, which admits
-    a superuser whatever their role, so the operator identity that reads this
-    surface on a standalone deployment is not locked out by the narrowing above."""
+async def test_a_superuser_with_only_a_member_role_cannot_list_keys(async_db: AsyncSession) -> None:
+    """The gate is `require_active_organization_management_access`, which no longer
+    admits a superuser whatever their role: deployment-operator status is not an
+    organization role, and does not stand in for one here. mozilla-ai/otari#1011."""
     organization = await _organization(async_db)
     owner = await _member(async_db, organization, role="owner", full_name="Owner")
     operator = await _member(async_db, organization, role="member", full_name="Operator")
@@ -216,7 +216,8 @@ async def test_superuser_member_may_still_list_keys(async_db: AsyncSession) -> N
     service = OrgProviderKeyService(async_db)
     await service.create_key_for_user(user=owner, request=_create_request())
 
-    assert len((await service.list_keys_for_user(user=operator)).data) == 1
+    with pytest.raises(NotAuthorizedError):
+        await service.list_keys_for_user(user=operator)
 
 
 async def test_credential_shaped_client_args_are_redacted_even_for_the_admin_who_set_them(
@@ -329,6 +330,41 @@ async def test_workspace_with_no_override_inherits_org_default(async_db: AsyncSe
     assert view.is_effective_default is True
     assert view.is_effective_enabled is True
     assert view.is_default is False, "no override row exists; the effective flag comes from the org default"
+
+
+async def test_a_key_that_will_not_decrypt_says_so_on_both_surfaces(
+    async_db: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A credential this deployment cannot read is listed, and reports that it cannot serve.
+
+    The override flags answer what the workspace chose and stay true, because
+    the workspace chose nothing: the credential is what broke. So the row is
+    otherwise identical to a working key while the catalog withholds its
+    provider, and the two surfaces disagree with nothing on this one to explain
+    it. That is the state a migration run under a different ``OTARI_SECRET_KEY``
+    leaves behind.
+    """
+    organization = await _organization(async_db)
+    owner = await _member(async_db, organization, role="owner", full_name="Owner")
+    workspace = await _workspace(async_db, organization, owner=owner)
+    service = OrgProviderKeyService(async_db)
+
+    key = await service.create_key_for_user(user=owner, request=_create_request())
+    assert key.usable is True
+
+    monkeypatch.setenv("OTARI_SECRET_KEY", generate_secret_key())
+    reset_org_provider_cache()
+
+    (listed,) = (await service.list_keys_for_user(user=owner)).data
+    assert listed.usable is False
+    # Still listed, and still carrying its tail: replacing it is the fix, so a
+    # row the deployment cannot read must not vanish from the page that edits it.
+    assert listed.last4 == "1234"
+
+    (view,) = (await service.list_effective_keys_for_workspace(user=owner, workspace_id=workspace.id)).data
+    assert view.usable is False
+    assert view.is_effective_enabled is True
+    assert view.is_effective_default is True
 
 
 async def test_sibling_workspace_can_pin_a_different_key(async_db: AsyncSession) -> None:

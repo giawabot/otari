@@ -23,6 +23,7 @@ import {
 import { OVERLAY_NAV_LABEL_OVERRIDES } from "@/app/nav/overlayLabelOverrides"
 import { OVERLAY_NAV_ITEMS } from "@/app/nav/overlayNavItems"
 import {
+  OVERLAY_DEPLOYMENT_NAV_SECTIONS,
   OVERLAY_NAV_SECTIONS,
   OVERLAY_ORG_NAV_SECTIONS,
 } from "@/app/nav/overlaySections"
@@ -103,25 +104,6 @@ const BASE_NAV_SECTIONS = [
       // carries: a row leaves the list by its page ceasing to refuse anyone
       // (otari-ai#1942). Models reads the catalog any session may read, and
       // Routing reads the tenant-scoped policy list for a non-operator.
-      // First in the section, and the only row here that is not configuration:
-      // "Build" is what the gateway serves, and the Playground is the one place
-      // you use what you built rather than change it. The roles matrix has it at
-      // full access for every role (otari-ai#1947), which is why it carries no
-      // `operatorOnly`: a completion here is billed to whoever sent it, in their
-      // own workspace, so the page serves every signed-in identity something
-      // true.
-      //
-      // Gated on the `playground` surface, which a hosted control plane does not
-      // report: the page dispatches a completion and that plane serves no
-      // inference (otari#822). The surface axis rather than the capability one
-      // for the reason the registry's own note gives, that a capability a base
-      // entry names must be granted.
-      {
-        to: "/playground",
-        label: "Playground",
-        surface: "playground",
-        icon: FiMessageSquare,
-      },
       {
         to: "/models",
         label: "Models",
@@ -607,28 +589,45 @@ export const ORG_NAV_SECTIONS: readonly NavSection[] = composeNavSections(
 )
 
 /**
- * The deployment rail as the shell reads it.
+ * The composed deployment sidebar.
  *
- * Deliberately not composed through the overlay seams the other two rails use.
- * Nothing contributes a deployment-scoped destination and its one section has
- * no heading to rename, so composing here would buy an overlay nothing and
- * leave a seam in the tree inviting the next reader to wonder what fills it.
- * Adding one when a destination actually wants it is a two-line change.
+ * Composed through the same three seams as the other two rails, because the
+ * distinction this rail draws is one an overlay can land on: a hosted edition
+ * administers the process every tenant is served by, and those destinations
+ * belong here rather than beside a tenant's own settings. Reached through the
+ * row seam, since the rail declares one headingless section and a contributed
+ * section would put a heading above rows that have none.
+ *
+ * Label overrides and row contributions come from the lists both other rails
+ * read. A section id is unique across all three (`registry.test.ts` pins that),
+ * so one list still addresses every rail and an overlay has one module to
+ * replace rather than three. This build appends nothing.
  */
 export const DEPLOYMENT_NAV_SECTIONS: readonly NavSection[] =
-  DEPLOYMENT_SECTIONS
+  composeNavSections(
+    composeNavItems(
+      applyNavLabelOverrides(DEPLOYMENT_SECTIONS, OVERLAY_NAV_LABEL_OVERRIDES),
+      OVERLAY_NAV_ITEMS,
+    ),
+    OVERLAY_DEPLOYMENT_NAV_SECTIONS,
+  )
 
-/**
- * Every registered entry, across all three contexts.
- *
- * Flattened over all of them because this is what answers "which entry is this
- * pathname", and a route is gated the same way whichever sidebar links to it.
- */
+// Kept in route lookup for surface gating, outside the sidebar sections.
+// Availability follows the gateway's inference surface, not a paid capability.
+export const PLAYGROUND_NAV_ITEM = {
+  to: "/playground",
+  label: "Playground",
+  surface: "playground",
+  icon: FiMessageSquare,
+} as const satisfies NavItem
+
+/** Route lookup includes chrome destinations as well as all three sidebar scopes. */
 export const NAV_ITEMS: readonly NavItem[] = [
-  ...NAV_SECTIONS,
-  ...ORG_NAV_SECTIONS,
-  ...DEPLOYMENT_NAV_SECTIONS,
-].flatMap((section) => section.items)
+  PLAYGROUND_NAV_ITEM,
+  ...[...NAV_SECTIONS, ...ORG_NAV_SECTIONS, ...DEPLOYMENT_NAV_SECTIONS].flatMap(
+    (section) => section.items,
+  ),
+]
 
 /**
  * Every nested destination, paired with the entry it is gated by.

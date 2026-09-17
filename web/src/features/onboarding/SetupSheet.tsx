@@ -2,7 +2,11 @@ import { Link } from "@tanstack/react-router"
 import { useState } from "react"
 
 import { Button } from "@/design-system/actions/Button"
-import { CONCEALED_SECRET, CopyField } from "@/design-system/actions/CopyField"
+import {
+  CONCEALED_SECRET,
+  CopyField,
+  concealedFingerprint,
+} from "@/design-system/actions/CopyField"
 import { CodeBlock } from "@/design-system/content/CodeBlock"
 import { Dialog, DialogSection } from "@/design-system/feedback/Dialog"
 import { ErrorBanner } from "@/design-system/feedback/ErrorBanner"
@@ -11,7 +15,6 @@ import { ListeningPanel } from "@/features/onboarding/ListeningPanel"
 import type { SetupFailure } from "@/features/onboarding/setupFailureCopy"
 import {
   buildSetupSnippets,
-  carriesKey,
   DEFAULT_SETUP_TAB,
   SETUP_TABS,
   type SetupSnippetId,
@@ -80,6 +83,9 @@ export function SetupSheet({
   // distinction with nothing behind it.
   const [isRevealed, setIsRevealed] = useState(false)
 
+  const concealedKey =
+    apiKey === undefined ? CONCEALED_SECRET : concealedFingerprint(apiKey)
+
   const instruction = SETUP_TABS.find(({ id }) => id === tab)?.instruction ?? ""
   // Built from the stand-in whenever the key is not on screen, which includes
   // the moment before it exists: what is rendered needs no key, so the examples
@@ -90,8 +96,7 @@ export function SetupSheet({
       ? undefined
       : buildSetupSnippets({
           baseUrl,
-          apiKey:
-            isRevealed && apiKey !== undefined ? apiKey : CONCEALED_SECRET,
+          apiKey: isRevealed && apiKey !== undefined ? apiKey : concealedKey,
           model,
         })
   // What a copy yields, always the real key: an operator who copies without
@@ -105,11 +110,15 @@ export function SetupSheet({
   return (
     <Dialog
       isOpen
-      onOpenChange={(open) => {
-        if (!open) onDismiss()
-      }}
+      // Empty, because this sheet is not dismissable: `Dialog` gates the
+      // callback on that, so a handler here would be a dismissal path that
+      // cannot run. `onDismiss` reaches it from the guidance links instead.
+      onOpenChange={() => {}}
       size="lg"
       isAnnouncement
+      isDismissable={false}
+      isScanning={!checkFailed}
+      scanTone={failure ? "danger" : "accent"}
       title="Send your first request"
       description={
         <>
@@ -137,9 +146,14 @@ export function SetupSheet({
         </p>
       }
       actions={
-        <Button isPending={isSkipping} onPress={onSkip}>
-          Skip
-        </Button>
+        // The wrapper names a place (see actions.md), which is all it does:
+        // the footer's own rules reach Skip through it and still give the phone
+        // sheet its full width and its press suppression.
+        <div className="otari-setup-actions flex w-full">
+          <Button isPending={isSkipping} onPress={onSkip}>
+            Skip
+          </Button>
+        </div>
       }
     >
       <DialogSection>
@@ -163,7 +177,7 @@ export function SetupSheet({
           <CopyField
             label="Your API key"
             value={apiKey}
-            concealed={CONCEALED_SECRET}
+            concealed={concealedKey}
             isRevealed={isRevealed}
             onRevealChange={setIsRevealed}
           />
@@ -205,10 +219,8 @@ export function SetupSheet({
           </CodeBlock>
           <p className="text-caption text-subtle">
             {tab === "agent"
-              ? "Works with Claude Code, Codex, Cursor, and any agent that can edit files and run commands. It reads the key from your environment rather than carrying it."
-              : carriesKey(tab) && !isRevealed
-                ? "The key is hidden in the example above and copied in full. Reveal it with the control beside the field."
-                : "Prefer to have an agent wire this up? The Agent tab is a paste-ready prompt."}
+              ? "Works with Claude Code, Codex, and Cursor. Reads your key from the environment."
+              : "Hidden keys use a stand-in; copies include your real key."}
           </p>
           {model === undefined ? (
             <p className="text-caption text-subtle">

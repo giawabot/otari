@@ -8,6 +8,7 @@ from types import ModuleType
 import pytest
 
 _SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "check_architecture.py"
+_DISCOVERY_MESSAGE = "Forbidden import in OSS base (no entry-point discovery; the feature registry is a literal tuple)"
 
 
 def _load() -> ModuleType:
@@ -30,7 +31,7 @@ def _write(src_root: Path, relative_path: str, content: str) -> Path:
 
 
 def test_service_importing_models_is_clean(tmp_path: Path) -> None:
-    file_path = _write(tmp_path, "gateway/services/thing.py", "from gateway.models.entities import User\n")
+    file_path = _write(tmp_path, "gateway/services/thing.py", "from gateway.models.users import User\n")
     assert check.check_file(file_path, tmp_path) == []
 
 
@@ -299,3 +300,36 @@ def test_main_discovers_tests_root_and_fails_on_overlay_import(tmp_path: Path, m
 
 def test_real_gateway_tree_is_clean() -> None:
     assert check.main() == 0
+
+
+def test_a_service_may_not_import_the_feature_registry(tmp_path: Path) -> None:
+    # Only the app wiring reads the registry; a service that imported it could
+    # register itself, which is discovery by another name.
+    file_path = _write(tmp_path, "gateway/services/thing.py", "from gateway.features import CORE_FEATURES\n")
+    assert check.check_file(file_path, tmp_path) == [(1, "gateway.features", "Forbidden import in Services")]
+
+
+def test_a_route_may_not_import_the_feature_registry(tmp_path: Path) -> None:
+    file_path = _write(tmp_path, "gateway/api/routes/alerts.py", "from gateway.features import CORE_FEATURES\n")
+    assert check.check_file(file_path, tmp_path) == [(1, "gateway.features", "Forbidden import in API routes")]
+
+
+@pytest.mark.parametrize("relative_path", ["gateway/features.py", "gateway/main.py", "gateway/services/thing.py"])
+def test_entry_point_discovery_is_forbidden_anywhere_under_gateway(tmp_path: Path, relative_path: str) -> None:
+    # The registry is a literal tuple on purpose; importlib.metadata is how the
+    # alternative gets written, and the message says so.
+    file_path = _write(tmp_path, relative_path, "from importlib.metadata import entry_points\n")
+    assert check.check_file(file_path, tmp_path) == [(1, "importlib.metadata", _DISCOVERY_MESSAGE)]
+
+
+@pytest.mark.parametrize(
+    ("source", "module"),
+    [
+        ("from importlib import metadata\n", "importlib.metadata"),
+        ("import importlib_metadata\n", "importlib_metadata"),
+        ("import pkg_resources\n", "pkg_resources"),
+    ],
+)
+def test_every_spelling_of_entry_point_discovery_is_forbidden(tmp_path: Path, source: str, module: str) -> None:
+    file_path = _write(tmp_path, "gateway/core/plugins.py", source)
+    assert check.check_file(file_path, tmp_path) == [(1, module, _DISCOVERY_MESSAGE)]

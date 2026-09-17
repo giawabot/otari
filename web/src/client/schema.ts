@@ -958,6 +958,83 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/catalog/models": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Catalog
+         * @description The models this caller may use, one entry each however many providers serve it.
+         *
+         *     Prices are the caller's: an organization's override where one applies, else
+         *     the deployment's row, else the genai-prices default. Aliases and routing
+         *     policies are not models and are not listed; see Routing. A visitor, where
+         *     the catalog is public, sees the configured instances at the deployment's
+         *     rates and nothing that belongs to a tenant.
+         */
+        get: operations["catalog-list_catalog"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/catalog/models/{model_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Catalog Model
+         * @description One model and every offering of it this caller may use.
+         *
+         *     The whole merged catalog is built and grouped to answer for one model. That
+         *     is deliberate: the identity a model is found by is a property of the group,
+         *     so narrowing the build to one model would need the grouping done first. The
+         *     query count is constant; the cost is CPU per page view, growing with the
+         *     size of the catalog rather than with the number of readers.
+         *
+         *     A model the caller may not see answers 404, the same as one that does not
+         *     exist, so the route cannot be used to probe the catalog behind an allow-list.
+         *     A signed-in caller's offerings also carry their organization's own usage of
+         *     each over the last 30 days.
+         */
+        get: operations["catalog-get_catalog_model"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/catalog/selectors/refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Refresh Selector Index
+         * @description Re-index the short spellings now, rather than on the refresher's next tick.
+         */
+        post: operations["catalog-refresh_selector_index"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/chat/completions": {
         parameters: {
             query?: never;
@@ -1158,6 +1235,32 @@ export interface paths {
         get: operations["health-health_readiness"];
         put?: never;
         post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/hooks/check": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Check Policy
+         * @description Evaluate a submitted policy against submitted evidence.
+         *
+         *     Authenticated with either an API key or the master key (the router-level
+         *     gate), like ``POST /api/v1/usage/external-events``: this identifies who
+         *     sent the request, not whether its evidence is true. `blocked` is set when
+         *     a required gate's outcome is not `pass`/`not_applicable` (an unresolved
+         *     gate never counts as a pass).
+         */
+        post: operations["hooks-check_policy"];
         delete?: never;
         options?: never;
         head?: never;
@@ -1646,7 +1749,8 @@ export interface paths {
          *
          *     The policies list's sibling, over ``model_aliases``, and scoped the same way:
          *     stored rows from the caller's visible workspaces, plus the config-file
-         *     aliases, which are deployment-wide.
+         *     aliases, which are deployment-wide, and narrowed to one workspace when
+         *     ``workspace_id`` names one.
          */
         get: operations["aliases-list_visible_aliases"];
         put?: never;
@@ -1911,7 +2015,7 @@ export interface paths {
          *     The member-scoped counterpart of ``POST /api/v1/keys``: the owner is always the
          *     caller's own attribution user, the key is always budget-enforced, and the
          *     workspace must be visible to the caller (a member of it, or an organization
-         *     owner/admin/superuser, who see every workspace). The secret is returned once.
+         *     owner/admin, who see every workspace). The secret is returned once.
          */
         post: operations["organization-keys-create_own_key"];
         delete?: never;
@@ -2218,9 +2322,12 @@ export interface paths {
          *
          *     Refused with a 409 when the period overlaps one already stored for that model,
          *     naming the period it collides with, rather than shadowing it. Refused with a
-         *     403 when the model is addressed through one of the deployment's own provider
-         *     instances: the deployment holds that credential and settles its upstream bill,
-         *     so its rate is the deployment price list's rather than a tenant's.
+         *     403 when the deployment, not the caller's organization, holds the credential
+         *     that serves the model, whether through one of its own provider instances or a
+         *     hosted credential the bound port supplies because no usable BYO credential of
+         *     the organization's own covers every one of its workspaces: either way the
+         *     deployment settles the upstream bill, so its rate is the deployment price
+         *     list's rather than a tenant's.
          *
          *     The key is normalized to its canonical ``instance:model`` form first, the same
          *     call ``POST /api/v1/pricing`` makes, and that is what makes one model one row
@@ -2391,7 +2498,8 @@ export interface paths {
          *     Stored policies from the caller's visible workspaces plus the config-file
          *     policies, which are deployment-wide and resolve in every workspace. The
          *     response is the shape ``GET /api/v1/routing/policies`` answers, narrowed to the
-         *     caller's own organization.
+         *     caller's own organization, and narrowed again to one workspace when
+         *     ``workspace_id`` names one.
          */
         get: operations["routing-list_visible_routing_policies"];
         put?: never;
@@ -2906,6 +3014,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/pricing/drift": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Pricing Drift
+         * @description Every stored deployment rate in force today, beside today's default for it.
+         *
+         *     A stored row shadows the genai-prices default silently and forever, whether
+         *     it was a deliberate override or a copy of a then-current default. This is
+         *     what makes the difference visible: a row that matches the default is a row
+         *     that could be deleted, and a row far from it is one worth a second look.
+         *     Tool rows (``otari:``) are per request and have no default to drift from,
+         *     so they are left out.
+         */
+        get: operations["pricing-list_pricing_drift"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/pricing/refresh": {
         parameters: {
             query?: never;
@@ -2946,6 +3081,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/pricing/refresh/pending": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Pending Pricing Refresh
+         * @description The update the scheduled refresh has left waiting for review, if any.
+         *
+         *     What the dashboard's notice reads. 404 when nothing is pending, so a page can
+         *     ask on load without treating the common case as an error banner.
+         */
+        get: operations["pricing-get_pending_pricing_refresh"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/pricing/refresh/reject": {
         parameters: {
             query?: never;
@@ -2960,6 +3118,26 @@ export interface paths {
          * @description Discard a reviewed default-price snapshot without applying it.
          */
         post: operations["pricing-reject_pricing_refresh"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/pricing/snapshots": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Pricing Snapshots
+         * @description The accepted default-price snapshots, newest first.
+         */
+        get: operations["pricing-list_pricing_snapshots"];
+        put?: never;
+        post?: never;
         delete?: never;
         options?: never;
         head?: never;
@@ -3849,27 +4027,28 @@ export interface paths {
          * List Builtin Guardrails
          * @description List the guardrails this gateway can run itself, for the form that defines one.
          *
-         *     Every guardrail ``any_guardrail`` ships, with the constructor and per-call
-         *     arguments each one takes, so a guardrail is configured by picking it and
-         *     filling typed fields. A parameter names the environment variable that fills it
+         *     Every guardrail ``any_guardrail`` reaches over a hosted API, with the
+         *     constructor and per-call arguments each one takes, so a guardrail is
+         *     configured by picking it and filling typed fields. It is not the whole
+         *     library: a guardrail that works by holding model weights in the process
+         *     running it belongs in the guardrails service the profiles read beside this one
+         *     describes, not here. A parameter names the environment variable that fills it
          *     where one exists, and ``requirement_groups`` carries the constraints satisfied
          *     by any of several parameters, which no single required flag can state. This is
          *     the counterpart of
          *     ``GET /api/v1/providers/catalog``: the same picker, for a guardrail rather
          *     than a provider, and on the same gate that one takes.
          *
-         *     Reaches no service, so there is no unavailable state to report. ``runnable``
-         *     says whether the modules a guardrail's backend needs are installed here,
-         *     probed rather than imported, and ``missing_extra`` names the Otari extra that
-         *     would fix it.
+         *     Reaches no service, so there is no unavailable state to report: the answer is
+         *     a property of the installed ``any_guardrail``, not of any deployment's state.
          *
-         *     On the operator router rather than the reader beside it, on both halves of
-         *     what it answers. It is the input to a write that stores a vendor API key
-         *     deployment-wide, which is an operator's action alone; and ``runnable``
-         *     describes the host's installed packages, which is infrastructure rather than
-         *     something a tenant is owed about their own requests. A profile *name* is the
-         *     one thing a caller needs, and the profiles read next door is where the set of
-         *     those is published.
+         *     On the operator router rather than the reader beside it, because it is the
+         *     input to a write that stores a vendor credential deployment-wide. The rows
+         *     carry secret constructor arguments and name the environment variables this
+         *     deployment would otherwise read them from, so this describes how the
+         *     deployment is credentialed rather than what a request will have done to it. A
+         *     profile *name* is the one thing a caller needs, and the profiles read next
+         *     door is where the set of those is published.
          *
          *     Not on ``verify_catalog_reader`` either: that plane is a closed set of three
          *     deployment-describing reads a data-plane key may make, and this is a
@@ -4209,7 +4388,13 @@ export interface paths {
         };
         /**
          * List Users
-         * @description List all users with pagination.
+         * @description List the users the caller's organization can name, with pagination.
+         *
+         *     ``users`` is deployment-global and has no organization column, so which of
+         *     them this organization can name is derived: a key, usage, or a roster row
+         *     puts one in reach, and one reached from nowhere at all (the shared
+         *     ``default`` owner, or a user just created) is shared rather than hidden.
+         *     See ``repositories.users_repository.in_organization``.
          */
         get: operations["users-list_users"];
         put?: never;
@@ -4233,21 +4418,21 @@ export interface paths {
         };
         /**
          * Get User
-         * @description Get details of a specific user.
+         * @description Get details of a user in the caller's organization.
          */
         get: operations["users-get_user"];
         put?: never;
         post?: never;
         /**
          * Delete User
-         * @description Delete a user, and erase the telemetry captured under their name.
+         * @description Delete a user in the caller's organization, and erase their telemetry.
          */
         delete: operations["users-delete_user"];
         options?: never;
         head?: never;
         /**
          * Update User
-         * @description Update a user.
+         * @description Update a user in the caller's organization.
          */
         patch: operations["users-update_user"];
         trace?: never;
@@ -4261,7 +4446,7 @@ export interface paths {
         };
         /**
          * Get User Usage
-         * @description Get usage history for a specific user.
+         * @description Get usage history for a user in the caller's organization.
          */
         get: operations["users-get_user_usage"];
         put?: never;
@@ -4869,6 +5054,26 @@ export interface components {
             organization_name: string;
             /** Role */
             role: string;
+        };
+        /**
+         * AcceptedSnapshotResponse
+         * @description One accepted genai-prices snapshot in the history.
+         */
+        AcceptedSnapshotResponse: {
+            /**
+             * Accepted At
+             * Format: date-time
+             */
+            accepted_at: string;
+            /**
+             * Accepted By
+             * @description `operator` for a dashboard confirm, `schedule` for the auto policy.
+             */
+            accepted_by: string;
+            /** Id */
+            id: string;
+            /** Model Count */
+            model_count: number;
         };
         /**
          * ActivationApiKeyPublic
@@ -5643,7 +5848,7 @@ export interface components {
         };
         /**
          * BuiltInGuardrailCatalog
-         * @description Every guardrail this gateway ships, whether or not it can currently run it.
+         * @description The guardrails this gateway can build and call itself.
          */
         BuiltInGuardrailCatalog: {
             /** Guardrails */
@@ -5686,11 +5891,6 @@ export interface components {
              */
             guardrail_name: string;
             /**
-             * Missing Extra
-             * @description The Otari extra to install to make this runnable, when one would. Null when it already runs, and null for a guardrail this gateway holds no backend information about
-             */
-            missing_extra?: string | null;
-            /**
              * Multilingual
              * @default false
              */
@@ -5717,11 +5917,6 @@ export interface components {
              * @default false
              */
             requires_api_key: boolean;
-            /**
-             * Runnable
-             * @description Whether every module this guardrail's backend needs is installed here. False is a missing package and not a broken guardrail
-             */
-            runnable: boolean;
             /** Stages */
             stages: string[];
             /**
@@ -5781,17 +5976,27 @@ export interface components {
          *     names. Publishing it costs nothing either, since it is the caller's own
          *     identity and they are holding the credential that resolved to it.
          *
-         *     Both fields are nullable, and for opposite reasons. A local operator
-         *     identity has no address, because first boot provisions it with a name and
-         *     nothing to sign in with but the master key; a member added to the roster by
+         *     ``email`` and ``full_name`` are nullable for opposite reasons. A local
+         *     operator identity has no address, because first boot provisions it with a
+         *     name and nothing to sign in with but the master key; a member added by
          *     address has no name until they claim the identity and supply one. So a shell
          *     has to be ready to draw either one alone.
          */
         CallerIdentityPublic: {
+            /**
+             * Claims Deployment
+             * @description Whether setting this identity's password claims the deployment, which stops the master key signing in to the dashboard. True for the deployment's operator until it holds a password, whether or not it already has an address; false for everybody else.
+             */
+            claims_deployment: boolean;
             /** Email */
             email?: string | null;
             /** Full Name */
             full_name?: string | null;
+            /**
+             * Has Password
+             * @description Whether this identity holds a dashboard password. False for one that signs in only through an OAuth provider or a passkey, and for a roster entry nobody has claimed yet. PUT /api/v1/auth/password requires current_password from a cookie-authenticated caller exactly while this is true.
+             */
+            has_password: boolean;
             /**
              * User Id
              * Format: uuid
@@ -5869,6 +6074,340 @@ export interface components {
             position: number;
             /** Selection Reason */
             selection_reason: string;
+        };
+        /**
+         * CatalogCapabilities
+         * @description What a model can do, as models.dev reports it. Any offering's yes is the model's.
+         */
+        CatalogCapabilities: {
+            /**
+             * Attachment
+             * @default false
+             */
+            attachment: boolean;
+            /**
+             * Reasoning
+             * @default false
+             */
+            reasoning: boolean;
+            /**
+             * Structured Output
+             * @default false
+             */
+            structured_output: boolean;
+            /**
+             * Temperature
+             * @default false
+             */
+            temperature: boolean;
+            /**
+             * Tool Call
+             * @default false
+             */
+            tool_call: boolean;
+        };
+        /**
+         * CatalogElsewhere
+         * @description A provider models.dev lists for this model that this deployment has not configured.
+         */
+        CatalogElsewhere: {
+            /** Name */
+            name: string;
+            /** Provider Type */
+            provider_type: string;
+        };
+        /**
+         * CatalogModelDetail
+         * @description One model with everything the detail page shows.
+         */
+        CatalogModelDetail: {
+            /** Also Available From */
+            also_available_from: components["schemas"]["CatalogElsewhere"][];
+            capabilities: components["schemas"]["CatalogCapabilities"];
+            /**
+             * Context Window
+             * @description The largest any offering serves.
+             */
+            context_window?: number | null;
+            /**
+             * Default Pricing
+             * @description Whether an unpriced model is metered at the genai-prices default.
+             */
+            default_pricing: boolean;
+            /**
+             * Deprecated
+             * @description True only when every offering with metadata says so.
+             * @default false
+             */
+            deprecated: boolean;
+            /**
+             * Description
+             * @description models.dev's, from the offering that named the model.
+             */
+            description?: string | null;
+            /**
+             * Discovered
+             * @description Whether any offering was discovered from its provider.
+             */
+            discovered: boolean;
+            /** Family */
+            family?: string | null;
+            /**
+             * Id
+             * @description The catalog id, vendor-qualified where the vendor is known: `z-ai/glm-5.3`, else the bare slug.
+             */
+            id: string;
+            /** Input Modalities */
+            input_modalities: string[];
+            /** Knowledge Cutoff */
+            knowledge_cutoff?: string | null;
+            /**
+             * Max Output Tokens
+             * @description The largest any offering serves.
+             */
+            max_output_tokens?: number | null;
+            /**
+             * Min Input Price Per Million
+             * @description The cheapest offering's, at the comparison context where one was asked for.
+             */
+            min_input_price_per_million?: number | null;
+            /** Min Output Price Per Million */
+            min_output_price_per_million?: number | null;
+            /** Name */
+            name: string;
+            /** Offering Count */
+            offering_count: number;
+            /** Offerings */
+            offerings: components["schemas"]["CatalogOffering"][];
+            /**
+             * Open Weights
+             * @default false
+             */
+            open_weights: boolean;
+            /** Output Modalities */
+            output_modalities: string[];
+            /**
+             * Price Sources
+             * @description Which price lists the priced offerings came from, distinct and sorted.
+             */
+            price_sources: ("organization" | "deployment" | "defaults")[];
+            /** Provider Count */
+            provider_count: number;
+            /**
+             * Providers
+             * @description The provider instances offering it, sorted.
+             */
+            providers: string[];
+            /** Release Date */
+            release_date?: string | null;
+            /**
+             * Resolves To
+             * @description The offering `selector` resolves to.
+             */
+            resolves_to?: string | null;
+            /**
+             * Selector
+             * @description The id as a selector: send it as `model` and the model's cheapest offering answers. Null until the gateway has indexed the catalog.
+             */
+            selector?: string | null;
+            /**
+             * Selectors
+             * @description Every offering's selector, so the list can be searched by one.
+             */
+            selectors: string[];
+            /**
+             * Unpriced Count
+             * @description How many offerings carry no price for this caller.
+             */
+            unpriced_count: number;
+            /** Vendor */
+            vendor: string | null;
+        };
+        /**
+         * CatalogModelSummary
+         * @description One model, as the list shows it.
+         */
+        CatalogModelSummary: {
+            capabilities: components["schemas"]["CatalogCapabilities"];
+            /**
+             * Context Window
+             * @description The largest any offering serves.
+             */
+            context_window?: number | null;
+            /**
+             * Deprecated
+             * @description True only when every offering with metadata says so.
+             * @default false
+             */
+            deprecated: boolean;
+            /**
+             * Description
+             * @description models.dev's, from the offering that named the model.
+             */
+            description?: string | null;
+            /**
+             * Discovered
+             * @description Whether any offering was discovered from its provider.
+             */
+            discovered: boolean;
+            /** Family */
+            family?: string | null;
+            /**
+             * Id
+             * @description The catalog id, vendor-qualified where the vendor is known: `z-ai/glm-5.3`, else the bare slug.
+             */
+            id: string;
+            /** Input Modalities */
+            input_modalities: string[];
+            /** Knowledge Cutoff */
+            knowledge_cutoff?: string | null;
+            /**
+             * Max Output Tokens
+             * @description The largest any offering serves.
+             */
+            max_output_tokens?: number | null;
+            /**
+             * Min Input Price Per Million
+             * @description The cheapest offering's, at the comparison context where one was asked for.
+             */
+            min_input_price_per_million?: number | null;
+            /** Min Output Price Per Million */
+            min_output_price_per_million?: number | null;
+            /** Name */
+            name: string;
+            /** Offering Count */
+            offering_count: number;
+            /**
+             * Open Weights
+             * @default false
+             */
+            open_weights: boolean;
+            /** Output Modalities */
+            output_modalities: string[];
+            /**
+             * Price Sources
+             * @description Which price lists the priced offerings came from, distinct and sorted.
+             */
+            price_sources: ("organization" | "deployment" | "defaults")[];
+            /** Provider Count */
+            provider_count: number;
+            /**
+             * Providers
+             * @description The provider instances offering it, sorted.
+             */
+            providers: string[];
+            /** Release Date */
+            release_date?: string | null;
+            /**
+             * Resolves To
+             * @description The offering `selector` resolves to.
+             */
+            resolves_to?: string | null;
+            /**
+             * Selector
+             * @description The id as a selector: send it as `model` and the model's cheapest offering answers. Null until the gateway has indexed the catalog.
+             */
+            selector?: string | null;
+            /**
+             * Selectors
+             * @description Every offering's selector, so the list can be searched by one.
+             */
+            selectors: string[];
+            /**
+             * Unpriced Count
+             * @description How many offerings carry no price for this caller.
+             */
+            unpriced_count: number;
+            /** Vendor */
+            vendor: string | null;
+        };
+        /**
+         * CatalogOffering
+         * @description One way this deployment can call a model: a selector on a provider.
+         */
+        CatalogOffering: {
+            /** Context Window */
+            context_window?: number | null;
+            /**
+             * Credential
+             * @description Whose key serves it: `deployment` for a `providers:` instance the operator configured, `organization` for a key the viewer's organization holds.
+             * @enum {string}
+             */
+            credential: "deployment" | "organization" | "hosted";
+            /**
+             * Discovered
+             * @description Whether the provider itself reported this model.
+             */
+            discovered: boolean;
+            /** Max Output Tokens */
+            max_output_tokens?: number | null;
+            /**
+             * Metadata Input Price Per Million
+             * @description What models.dev lists this provider charging, for a cross-check. Not billed from: two independent datasets disagreeing is the cheapest stale-price detector there is.
+             */
+            metadata_input_price_per_million?: number | null;
+            /** Metadata Output Price Per Million */
+            metadata_output_price_per_million?: number | null;
+            /**
+             * Price Reference
+             * @description For a default, the genai-prices `provider:model` entry that matched; the selector otherwise.
+             */
+            price_reference?: string | null;
+            /**
+             * Price Source
+             * @description Which price list `pricing` came from, for this viewer: the organization's own override, the deployment's stored row, or the genai-prices defaults. Null when nothing prices it.
+             */
+            price_source?: ("organization" | "deployment" | "defaults") | null;
+            pricing?: components["schemas"]["ModelPricingInfo"] | null;
+            /**
+             * Provider
+             * @description The provider instance the selector names.
+             */
+            provider: string;
+            /**
+             * Provider Type
+             * @description The any-llm implementation behind the instance.
+             */
+            provider_type: string;
+            /**
+             * Quantization
+             * @description From the provider's id, when it names one.
+             */
+            quantization?: string | null;
+            /**
+             * Selector
+             * @description What to send as `model`, in `instance:model` form.
+             */
+            selector: string;
+            /**
+             * Short Selector
+             * @description A shorter spelling the gateway also accepts: the instance with the model's cleaned id (`fireworks:gpt-oss-120b`). Null where two offerings on the instance would share it, or until the gateway has indexed the catalog.
+             */
+            short_selector?: string | null;
+            usage_30d?: components["schemas"]["OfferingUsage"] | null;
+        };
+        /**
+         * CatalogResponse
+         * @description The grouped catalog, and the facts a reader needs to interpret its prices.
+         */
+        CatalogResponse: {
+            /**
+             * Default Pricing
+             * @description Whether an unpriced model is metered at the genai-prices default.
+             */
+            default_pricing: boolean;
+            /**
+             * Defaults As Of
+             * @description When the accepted genai-prices snapshot was taken. Null while the bundled dataset serves.
+             */
+            defaults_as_of: string | null;
+            /**
+             * Metadata Available
+             * @description False when models.dev could not be read; descriptions are then absent.
+             */
+            metadata_available: boolean;
+            /** Models */
+            models: components["schemas"]["CatalogModelSummary"][];
         };
         /**
          * CeremonyOptions
@@ -6537,6 +7076,12 @@ export interface components {
              */
             privacy_url: string | null;
             /**
+             * Public Catalog
+             * @description Whether the model catalog is served to a visitor with no session: GET /api/v1/catalog/models answers anonymously and the dashboard renders Models ahead of sign-in. False for a hybrid gateway, which serves no catalog of its own.
+             * @default false
+             */
+            public_catalog: boolean;
+            /**
              * Session Type
              * @description The kind of session this deployment issues, not whether the caller holds one. 'local_operator' is the standalone operator sign-in (see sign_in_methods for which credential it currently accepts), 'hosted_user' an otari.ai account, and 'none' a deployment that issues no management session at all.
              * @enum {string}
@@ -6960,6 +7505,19 @@ export interface components {
             timestamp: string;
             /** User Id */
             user_id?: string | null;
+        };
+        /** GateResultResponse */
+        GateResultResponse: {
+            /** Detail */
+            detail?: string | null;
+            /** Enforcement */
+            enforcement: string;
+            /** Gate Id */
+            gate_id: string;
+            /** Message */
+            message: string;
+            /** Outcome */
+            outcome: string;
         };
         /**
          * GatewaySettings
@@ -7964,6 +8522,11 @@ export interface components {
             pricing_tiers?: (components["schemas"]["PricingTier"] | {
                 [key: string]: number;
             })[];
+            /**
+             * Unit
+             * @default tokens
+             */
+            unit: string;
         };
         /**
          * ModerationRequest
@@ -8073,12 +8636,40 @@ export interface components {
             user_id: string;
         };
         /**
+         * OfferingUsage
+         * @description What the viewer's organization actually paid for one offering, last 30 days.
+         *
+         *     The listed rate is what a token costs; this is what the tokens cost, which is
+         *     lower wherever prompt caching hit. Absent for a visitor and for an offering
+         *     the organization never called.
+         */
+        OfferingUsage: {
+            /**
+             * Cache Hit Rate
+             * @description Cache-read tokens over prompt tokens. Null when no prompt tokens.
+             */
+            cache_hit_rate: number | null;
+            /** Cache Read Tokens */
+            cache_read_tokens: number;
+            /**
+             * Effective Price Per Million
+             * @description Spend over every token served, per million. Null when no tokens were served.
+             */
+            effective_price_per_million: number | null;
+            /** Requests */
+            requests: number;
+            /** Spend Usd */
+            spend_usd: number;
+            /** Total Tokens */
+            total_tokens: number;
+        };
+        /**
          * OrgProviderKeyCreateRequest
          * @description What a caller sends to create a key.
          *
          *     The plaintext key is never stored as sent: the service encrypts it
          *     (`services/secret_box.py`) and keeps only the ciphertext and ``last4``,
-         *     the same convention `entities.ProviderCredential` already uses.
+         *     the same convention `providers.ProviderCredential` already uses.
          */
         OrgProviderKeyCreateRequest: {
             /** Api Base */
@@ -8132,6 +8723,11 @@ export interface components {
             provider: string;
             /** Updated At */
             updated_at?: string | null;
+            /**
+             * Usable
+             * @description False when the stored credential cannot be decrypted on this deployment, so the key supplies nothing at dispatch and the catalog withholds its provider. A row this deployment cannot read is still listed, because deleting or replacing it is what fixes it.
+             */
+            usable: boolean;
         };
         /**
          * OrgProviderKeyUpdateRequest
@@ -8376,7 +8972,7 @@ export interface components {
          *
          *     ``credential`` is never stored as sent: it is encrypted with
          *     ``OTARI_SECRET_KEY`` and only the ciphertext is kept, the same convention
-         *     `entities.WorkspaceMcpServer` and `entities.ProviderCredential` use. It is
+         *     `tools.WorkspaceMcpServer` and `providers.ProviderCredential` use. It is
          *     sent to the endpoint as ``Authorization: Bearer`` when the guardrail runs,
          *     so it authenticates this gateway to the guardrails service the entry names.
          *     A guardrail *vendor's* own key is not this: the guardrails service builds
@@ -8650,6 +9246,13 @@ export interface components {
              * @description Whole-request context thresholds. Fields omitted by a tier inherit the base rate.
              */
             pricing_tiers?: components["schemas"]["PricingTier"][] | null;
+            /**
+             * Unit
+             * @description What the rates are per: tokens for a model, requests or images for a non-token endpoint.
+             * @default tokens
+             * @enum {string}
+             */
+            unit: "tokens" | "requests" | "images";
         };
         /**
          * OrganizationModelPricingPublic
@@ -8692,6 +9295,8 @@ export interface components {
             output_price_per_million: number;
             /** Pricing Tiers */
             pricing_tiers: components["schemas"]["PricingTier"][];
+            /** Unit */
+            unit: string;
             /**
              * Updated At
              * Format: date-time
@@ -8762,6 +9367,13 @@ export interface components {
              * @description Whole-request context thresholds. Fields omitted by a tier inherit the base rate.
              */
             pricing_tiers?: components["schemas"]["PricingTier"][] | null;
+            /**
+             * Unit
+             * @description What the rates are per: tokens for a model, requests or images for a non-token endpoint.
+             * @default tokens
+             * @enum {string}
+             */
+            unit: "tokens" | "requests" | "images";
         };
         /**
          * OrganizationModelPricingsPublic
@@ -9301,6 +9913,40 @@ export interface components {
             web_search: components["schemas"]["PlaygroundToolStatus"];
         };
         /**
+         * PolicyCheckRequest
+         * @description A policy body plus the evidence to check it against, both caller-supplied.
+         */
+        PolicyCheckRequest: {
+            /**
+             * Changed Paths
+             * @description Repo-relative paths the caller observed changed (e.g. `git status --porcelain`).
+             */
+            changed_paths?: string[] | null;
+            /**
+             * Commands
+             * @description Shell commands the caller observed run or is about to run.
+             */
+            commands?: string[] | null;
+            /** Policy Yaml */
+            policy_yaml: string;
+        };
+        /** PolicyCheckResponse */
+        PolicyCheckResponse: {
+            /** Blocked */
+            blocked: boolean;
+            /** Policy Id */
+            policy_id: string;
+            /**
+             * Provenance
+             * @default client_reported
+             */
+            provenance: string;
+            /** Results */
+            results: components["schemas"]["GateResultResponse"][];
+            /** Schema Version */
+            schema_version: string;
+        };
+        /**
          * PolicyRequest
          * @description Request to create or update a routing policy.
          */
@@ -9368,6 +10014,43 @@ export interface components {
             warm: boolean;
         };
         /**
+         * PricingDriftRow
+         * @description A stored deployment rate beside the default it shadows.
+         */
+        PricingDriftRow: {
+            /**
+             * Default Input Price Per Million
+             * @description What genai-prices would meter this key at today. Null when the dataset does not know it.
+             */
+            default_input_price_per_million: number | null;
+            /** Default Output Price Per Million */
+            default_output_price_per_million: number | null;
+            /**
+             * Default Reference
+             * @description The genai-prices entry the default came from.
+             */
+            default_reference: string | null;
+            /** Effective At */
+            effective_at: string;
+            /**
+             * Input Delta Percent
+             * @description (stored - default) / default, as a percentage.
+             */
+            input_delta_percent: number | null;
+            /** Input Price Per Million */
+            input_price_per_million: number;
+            /** Model Key */
+            model_key: string;
+            /** Origin */
+            origin: string | null;
+            /** Output Delta Percent */
+            output_delta_percent: number | null;
+            /** Output Price Per Million */
+            output_price_per_million: number;
+            /** Unit */
+            unit: string;
+        };
+        /**
          * PricingRefreshChangeResponse
          * @description One default model price changed by a pending refresh.
          */
@@ -9430,10 +10113,20 @@ export interface components {
             input_price_per_million: number;
             /** Model Key */
             model_key: string;
+            /**
+             * Origin
+             * @description Which writer set this row: config, api, or migration. Null when recorded before origins were.
+             */
+            origin: string | null;
             /** Output Price Per Million */
             output_price_per_million: number;
             /** Pricing Tiers */
             pricing_tiers: components["schemas"]["PricingTier"][];
+            /**
+             * Unit
+             * @description What the rates are per: tokens, requests, or images.
+             */
+            unit: string;
             /** Updated At */
             updated_at: string;
         };
@@ -10191,6 +10884,27 @@ export interface components {
             stored: components["schemas"]["StoredSearchToolSchema"][];
         };
         /**
+         * SelectorIndexResponse
+         * @description What the rebuilt index knows.
+         */
+        SelectorIndexResponse: {
+            /**
+             * Models
+             * @description Slugs that resolve to an offering.
+             */
+            models: number;
+            /**
+             * Offerings
+             * @description Selectors the deployment serves.
+             */
+            offerings: number;
+            /**
+             * Short Selectors
+             * @description Offerings with an unambiguous short spelling.
+             */
+            short_selectors: number;
+        };
+        /**
          * SendTestMailRequest
          * @description Where to send the test message.
          */
@@ -10320,6 +11034,13 @@ export interface components {
              * @description Whole-request context thresholds. Fields omitted by a tier inherit the base rate.
              */
             pricing_tiers?: components["schemas"]["PricingTier"][] | null;
+            /**
+             * Unit
+             * @description What the rates are per: 'tokens' for a model, 'requests' for a gateway-run tool or a moderation call (USD per million requests), 'images' for image generation.
+             * @default tokens
+             * @enum {string}
+             */
+            unit: "tokens" | "requests" | "images";
         };
         /**
          * SignupRequest
@@ -10828,6 +11549,10 @@ export interface components {
             models_dev_cache_ttl_seconds?: number | null;
             /** Models Dev Metadata */
             models_dev_metadata?: boolean | null;
+            /** Pricing Refresh */
+            pricing_refresh?: ("manual" | "review" | "auto") | null;
+            /** Public Catalog */
+            public_catalog?: boolean | null;
             /** Reject User Mismatch */
             reject_user_mismatch?: boolean | null;
             /** Require Pricing */
@@ -11733,7 +12458,7 @@ export interface components {
          *
          *     ``authorization_token`` is never stored as sent: it is encrypted with
          *     ``OTARI_SECRET_KEY`` and only the ciphertext is kept, the same convention
-         *     `entities.ProviderCredential` and `OrgProviderKey` already use.
+         *     `providers.ProviderCredential` and `OrgProviderKey` already use.
          */
         WorkspaceMcpServerCreate: {
             /**
@@ -11968,6 +12693,8 @@ export interface components {
              * Format: uuid
              */
             org_provider_key_id: string;
+            /** Usable */
+            usable: boolean;
             /**
              * Workspace Id
              * Format: uuid
@@ -13480,6 +14207,89 @@ export interface operations {
             };
         };
     };
+    "catalog-list_catalog": {
+        parameters: {
+            query?: {
+                /** @description Compare prices for a request of this many input tokens: each model's minimum is taken from the pricing tier that request would settle at. Omitted, the base rates compare. */
+                at_context?: number | null;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    "catalog-get_catalog_model": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                model_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["CatalogModelDetail"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    "catalog-refresh_selector_index": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SelectorIndexResponse"];
+                };
+            };
+        };
+    };
     "chat-chat_completions": {
         parameters: {
             query?: never;
@@ -13782,6 +14592,39 @@ export interface operations {
                     "application/json": {
                         [key: string]: unknown;
                     };
+                };
+            };
+        };
+    };
+    "hooks-check_policy": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["PolicyCheckRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PolicyCheckResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };
@@ -14631,6 +15474,8 @@ export interface operations {
             query?: {
                 /** @description Maximum entries to return, stored and config-file together. */
                 limit?: number;
+                /** @description Only stored entries in this workspace. Config-file entries are always included, being deployment-wide. Omit for every workspace this caller may see. */
+                workspace_id?: string | null;
             };
             header?: never;
             path?: never;
@@ -15992,6 +16837,8 @@ export interface operations {
             query?: {
                 /** @description Maximum entries to return, stored and config-file together. */
                 limit?: number;
+                /** @description Only stored entries in this workspace. Config-file entries are always included, being deployment-wide. Omit for every workspace this caller may see. */
+                workspace_id?: string | null;
             };
             header?: never;
             path?: never;
@@ -16977,6 +17824,37 @@ export interface operations {
             };
         };
     };
+    "pricing-list_pricing_drift": {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PricingDriftRow"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     "pricing-preview_pricing_refresh": {
         parameters: {
             query?: never;
@@ -17017,6 +17895,26 @@ export interface operations {
             };
         };
     };
+    "pricing-get_pending_pricing_refresh": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PricingRefreshPreviewResponse"];
+                };
+            };
+        };
+    };
     "pricing-reject_pricing_refresh": {
         parameters: {
             query?: never;
@@ -17032,6 +17930,37 @@ export interface operations {
                     [name: string]: unknown;
                 };
                 content?: never;
+            };
+        };
+    };
+    "pricing-list_pricing_snapshots": {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AcceptedSnapshotResponse"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
             };
         };
     };

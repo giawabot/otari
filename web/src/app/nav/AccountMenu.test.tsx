@@ -3,7 +3,7 @@ import userEvent from "@testing-library/user-event"
 import { afterEach, describe, expect, it, vi } from "vitest"
 
 import { AccountMenu } from "@/app/nav/AccountMenu"
-import type { DeploymentBootstrap, OrganizationContext } from "@/client"
+import type { CallerIdentity, DeploymentBootstrap } from "@/client"
 import { useOrganizationContext } from "@/shared/api/organizations"
 import { DeploymentProvider } from "@/shared/hooks/useDeployment"
 import {
@@ -19,15 +19,22 @@ import { renderWithRouter } from "@/tests/router"
 // case installs one, including the ones about the menu's rows: the component
 // makes that request either way, and an unstubbed `fetch` would leave it
 // failing in the background of a test that is not about it.
-function mockCaller(caller: OrganizationContext["caller"]) {
-  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
-    Response.json(organizationContext({ caller })),
-  )
-}
-
 // The identity a standalone first boot leaves behind, which the fixture already
 // describes: a name and no address.
-const OPERATOR = organizationContext().caller
+const OPERATOR = organizationContext().caller as CallerIdentity
+
+// The argument is merged onto that identity rather than replacing it, so a case
+// about a name or an address spells only the field it is about. `null` is the
+// other thing the context can report, which is no identity at all.
+function mockCaller(caller: Partial<CallerIdentity> | null = {}) {
+  vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+    Response.json(
+      organizationContext({
+        caller: caller === null ? undefined : { ...OPERATOR, ...caller },
+      }),
+    ),
+  )
+}
 
 // The other thing that read can do. The trigger names nobody rather than
 // guessing, for the same reason it does before the answer lands.
@@ -91,6 +98,25 @@ afterEach(() => {
 })
 
 describe("AccountMenu", () => {
+  it("keeps Playground reachable on mobile before Documentation", async () => {
+    mockCaller(OPERATOR)
+    await openMenu()
+    const link = screen.getByRole("link", { name: "Playground" })
+    expect(link).toHaveAttribute("href", "/playground")
+    expect(link).toHaveClass("md:hidden")
+    expect(link.nextElementSibling).toBe(
+      screen.getByRole("link", { name: "Documentation" }),
+    )
+  })
+
+  it("omits Playground from the mobile menu when unavailable", async () => {
+    mockCaller(OPERATOR)
+    await openMenu({ surfaces: [] })
+    expect(
+      screen.queryByRole("link", { name: "Playground" }),
+    ).not.toBeInTheDocument()
+  })
+
   it("opens the account page, rather than naming a destination it cannot reach", async () => {
     mockCaller(OPERATOR)
     await openMenu()
@@ -273,7 +299,7 @@ describe("AccountMenu", () => {
   })
 
   it("names nobody when the deployment reports no identity at all", async () => {
-    mockCaller(undefined)
+    mockCaller(null)
     await renderMenu()
     await settled()
 

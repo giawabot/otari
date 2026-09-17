@@ -31,9 +31,8 @@ from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
 from gateway.core.config import API_ROOT
-from gateway.models.entities import DashboardSession
 from gateway.models.provider_keys import OrgProviderKey
-from gateway.models.tenancy import Organization, OrganizationMember, User, Workspace, WorkspaceMember
+from gateway.models.tenancy import DashboardSession, Organization, OrganizationMember, User, Workspace, WorkspaceMember
 from gateway.services.dashboard_session_service import SESSION_COOKIE_NAME, hash_session_token
 from gateway.services.secret_box import encrypt_secret, generate_secret_key
 
@@ -272,6 +271,27 @@ def test_an_alias_list_shows_no_other_tenants_rows(client: TestClient, world: _W
     body = {"name": "beta-alias", "target": _BETA_TARGET, "workspace_id": str(world.workspaces["beta_one"])}
     assert _post(client, world, "beta_owner", _ALIASES, body).status_code == status.HTTP_200_OK
     assert "beta-alias" not in {row["name"] for row in _get(client, world, "alpha_admin", _ALIASES).json()}
+
+
+def test_both_lists_narrow_to_a_named_workspace(client: TestClient, world: _World) -> None:
+    """The Routing page reads one workspace at a time (otari-ai#2087).
+
+    Alpha's own workspace lists the rows; Beta's lists none, because the filter
+    narrows the scope derived from the caller's memberships and never widens it.
+    """
+    policy = _policy_body(world, name="scoped-fast")
+    alias = {"name": "scoped-alias", "target": _ALPHA_TARGET, "workspace_id": str(world.workspaces["alpha_one"])}
+    assert _post(client, world, "alpha_admin", _POLICIES, policy).status_code == status.HTTP_200_OK
+    assert _post(client, world, "alpha_admin", _ALIASES, alias).status_code == status.HTTP_200_OK
+
+    for path, name in ((_POLICIES, "scoped-fast"), (_ALIASES, "scoped-alias")):
+        own = _get(client, world, "alpha_admin", f"{path}?workspace_id={world.workspaces['alpha_one']}")
+        assert own.status_code == status.HTTP_200_OK, own.text
+        assert name in {row["name"] for row in own.json()}
+
+        foreign = _get(client, world, "alpha_admin", f"{path}?workspace_id={world.workspaces['beta_one']}")
+        assert foreign.status_code == status.HTTP_200_OK, foreign.text
+        assert {row["name"] for row in foreign.json() if row["source"] == "stored"} == set()
 
 
 def test_the_deployment_wide_writers_still_refuse_a_tenant(client: TestClient, world: _World) -> None:

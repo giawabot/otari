@@ -26,7 +26,7 @@ from sqlalchemy.orm import sessionmaker
 from gateway.core.config import API_ROOT, GatewayConfig
 from gateway.log_config import logger as gateway_logger
 from gateway.main import create_app
-from gateway.models.entities import DashboardSession
+from gateway.models.tenancy import DashboardSession
 from gateway.services.dashboard_session_service import SESSION_COOKIE_NAME
 from gateway.services.password_service import MAX_PASSWORD_BYTES, MIN_PASSWORD_LENGTH, hash_password
 from gateway.services.tenancy.provisioning_service import BOOTSTRAP_IDENTITY_KEY
@@ -529,6 +529,45 @@ def test_a_sign_in_body_must_carry_exactly_one_credential(tmp_path: Path, body: 
 # =============================================================================
 # Changing a password
 # =============================================================================
+
+
+def test_the_membership_context_reports_whether_the_caller_holds_a_password(tmp_path: Path) -> None:
+    """mozilla-ai/otari-ai#2099: the account page asks about the caller, not the deployment.
+
+    ``sign_in_methods`` is the deployment's answer, and building the password
+    form from it showed the change form to everybody on a claimed deployment,
+    including the people who hold no password to change. ``caller.has_password``
+    is the question that form actually turns on, and it tracks the column
+    through the write rather than being derived from the claim.
+    """
+    with _client(tmp_path) as client:
+        _sign_in_with_master_key(client)
+        assert client.get(f"{API_ROOT}/organizations/me").json()["caller"]["has_password"] is False
+
+        assert (
+            client.put(f"{API_ROOT}/auth/password", json={"email": EMAIL, "new_password": PASSWORD}).status_code == 200
+        )
+
+        assert client.get(f"{API_ROOT}/organizations/me").json()["caller"]["has_password"] is True
+
+
+def test_the_membership_context_reports_whether_a_password_claims_the_deployment(tmp_path: Path) -> None:
+    """An adopted operator already has an address, so a missing address cannot signal the claim."""
+    with _client(tmp_path) as client:
+        _sign_in_with_master_key(client)
+
+    engine = create_engine(f"sqlite:///{tmp_path / 'password-test.db'}")
+    with engine.begin() as connection:
+        connection.execute(text('UPDATE "user" SET email = :email'), {"email": EMAIL})
+
+    with _client(tmp_path) as client:
+        _sign_in_with_master_key(client)
+        assert client.get(f"{API_ROOT}/organizations/me").json()["caller"]["claims_deployment"] is True
+
+        response = client.put(f"{API_ROOT}/auth/password", json={"new_password": PASSWORD})
+        assert response.json() == {"email": EMAIL, "master_key_sign_in_retired": True}
+
+        assert client.get(f"{API_ROOT}/organizations/me").json()["caller"]["claims_deployment"] is False
 
 
 def test_a_signed_in_operator_changes_their_password_with_the_current_one(tmp_path: Path) -> None:

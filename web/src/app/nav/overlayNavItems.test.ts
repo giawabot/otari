@@ -1,14 +1,18 @@
-import { FiCreditCard, FiServer } from "react-icons/fi"
+import { FiCpu, FiCreditCard, FiServer } from "react-icons/fi"
 import { describe, expect, it, vi } from "vitest"
 
-import { NAV_SECTIONS, ORG_NAV_SECTIONS } from "./registry"
+import {
+  DEPLOYMENT_NAV_SECTIONS,
+  NAV_SECTIONS,
+  ORG_NAV_SECTIONS,
+} from "./registry"
 import type { NavSection } from "./types"
 
 /**
  * The seam as a build that replaces the module sees it, which is the one thing
  * `registry.test.ts` cannot show: the list is empty there, so its assertions
  * hold whether or not the registry applies the contributions at all. Unwiring
- * `composeNavItems` from either rail leaves that suite green and turns this file
+ * `composeNavItems` from any rail leaves that suite green and turns this file
  * red, which is the point of it, and the organization rail is the one that
  * matters most: Billing and Gateways are why the seam exists and both land
  * there.
@@ -33,6 +37,13 @@ vi.mock("./overlayNavItems", () => ({
     {
       sectionId: "observe",
       items: [{ to: "/usage", label: "Reports", icon: FiServer }],
+    },
+    // And the deployment rail, from that same list. A hosted edition
+    // administers the process every tenant is served by, which is neither a
+    // workspace's scope nor a tenant's.
+    {
+      sectionId: "deployment-general",
+      items: [{ to: "/settings", label: "Hosted providers", icon: FiCpu }],
     },
   ],
 }))
@@ -59,13 +70,21 @@ describe("a build that replaces the nav-item module", () => {
     ).toEqual(["Activity", "Usage", "Reports"])
   })
 
+  it("appends into the deployment rail from that same list", () => {
+    expect(
+      section(DEPLOYMENT_NAV_SECTIONS, "deployment-general")?.items.map(
+        (item) => item.label,
+      ),
+    ).toEqual(["Settings", "Accounts", "Hosted providers"])
+  })
+
   it("leaves every section no contribution names alone", () => {
     expect(
       section(ORG_NAV_SECTIONS, "org-people")?.items.map((item) => item.label),
     ).toEqual(["Workspaces", "Members & roles", "Email domains", "Providers"])
     expect(
       section(NAV_SECTIONS, "gateway")?.items.map((item) => item.label),
-    ).toEqual(["Playground", "Models", "Routing", "Tools"])
+    ).toEqual(["Models", "Routing", "Tools"])
   })
 
   it("leaves a contributed row ungated unless it says otherwise", () => {

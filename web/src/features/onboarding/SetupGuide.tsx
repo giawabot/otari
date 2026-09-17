@@ -14,6 +14,7 @@ import { useModels } from "@/shared/api/models"
 import { resolveSnippetBaseUrl } from "@/shared/helpers/requestSnippets"
 import { useSelectedWorkspace } from "@/shared/hooks/SelectedWorkspace"
 import { useDeployment, useSurfaces } from "@/shared/hooks/useDeployment"
+import { usePrefersReducedMotion } from "@/shared/hooks/usePrefersReducedMotion"
 
 /**
  * The step between "a provider is configured" and "this dashboard has something
@@ -98,6 +99,7 @@ function SetupFlow({
   onCheckNow: () => Promise<unknown>
 }) {
   const navigate = useNavigate()
+  const prefersReducedMotion = usePrefersReducedMotion()
   const createKey = useCreateActivationKey()
   const dismiss = useDismissActivation()
   const models = useModels()
@@ -107,13 +109,11 @@ function SetupFlow({
   // the examples are then withheld rather than aimed at this host (otari#823).
   const baseUrl = resolveSnippetBaseUrl(useDeployment())
 
-  // Closing the sheet without skipping: for this page load only, so Escape is
-  // not a decision an operator cannot take back. Skipping is the permanent one,
-  // and the server records it.
   // The issued key and a failed mint, held here rather than read off the
   // mutation. The effect below says why the observer cannot carry them.
   const [issued, setIssued] = useState<ActivationApiKey>()
   const [mintError, setMintError] = useState<unknown>()
+  // Guidance links leave the sheet temporarily; Skip retires it on the server.
   const [isClosed, setIsClosed] = useState(false)
   const [isFinished, setIsFinished] = useState(false)
   // Only a press somebody made, never the background poll: `isFetching` would
@@ -187,7 +187,13 @@ function SetupFlow({
   const checkNow = async () => {
     setIsChecking(true)
     try {
-      await onCheckNow()
+      // Match the original activation flow: let the working orb complete a beat.
+      await Promise.all([
+        onCheckNow(),
+        new Promise((resolve) =>
+          setTimeout(resolve, prefersReducedMotion ? 0 : 2_400),
+        ),
+      ])
     } finally {
       setIsChecking(false)
     }

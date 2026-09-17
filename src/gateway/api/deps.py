@@ -1,5 +1,7 @@
 import secrets
+import uuid
 from collections.abc import AsyncGenerator, Awaitable, Callable
+from contextlib import aclosing
 from datetime import UTC, datetime
 from typing import Annotated
 
@@ -11,9 +13,10 @@ from gateway.auth.models import hash_key
 from gateway.container import Container
 from gateway.core.config import API_KEY_HEADER, X_API_KEY_HEADER, GatewayConfig
 from gateway.core.database import DATABASE_ERRORS, create_session, get_db
+from gateway.core.feature import CoreFeature
 from gateway.log_config import logger
-from gateway.metrics import record_auth_failure
-from gateway.models.entities import APIKey
+from gateway.metrics import REGISTRY, Counter
+from gateway.models.api_keys import APIKey
 from gateway.models.tenancy import User as TenancyUser
 from gateway.ports.billing_port import BillingPort
 from gateway.ports.entitlement_port import EntitlementPort
@@ -26,6 +29,7 @@ from gateway.services.file_store import FileStore
 from gateway.services.log_writer import LogWriter
 from gateway.services.master_key_service import hash_master_key, is_generated_master_key, load_master_key_hash
 from gateway.services.routing import clear_router_backend_cache
+from gateway.services.tenancy import OrganizationService
 from gateway.services.tenancy.deployment_user_service import DeploymentUserService
 from gateway.services.tenancy.provisioning_service import ensure_bootstrap_identity
 
@@ -34,6 +38,18 @@ from gateway.services.tenancy.provisioning_service import ensure_bootstrap_ident
 # falls back to this shim for callers that set it directly (see ``set_config``).
 _config: GatewayConfig | None = None
 _LAST_USED_UPDATE_INTERVAL_SECONDS = 300
+
+AUTH_FAILURES = Counter(
+    "gateway_auth_failures",
+    "Total number of authentication failures",
+    ["reason"],
+    registry=REGISTRY,
+)
+
+
+def record_auth_failure(reason: str) -> None:
+    """Record an authentication failure."""
+    AUTH_FAILURES.labels(reason=reason).inc()
 
 
 def _as_utc(value: datetime | None) -> datetime | None:
@@ -86,6 +102,15 @@ def reset_config() -> None:
     # decision cache, so a test that swaps config must not inherit the previous
     # one's trace stickiness.
     clear_router_backend_cache()
+
+
+def get_enabled_features(request: Request) -> tuple[CoreFeature, ...]:
+    """Return the core features this app enabled when it was built."""
+    enabled: tuple[CoreFeature, ...] | None = getattr(request.app.state, "enabled_features", None)
+    if enabled is None:
+        msg = "Enabled features not initialized"
+        raise RuntimeError(msg)
+    return enabled
 
 
 def _extract_bearer_token(request: Request, config: GatewayConfig) -> str:
@@ -391,11 +416,10 @@ async def require_deployment_operator(
     later inherits the gate instead of being reachable with no credential at
     all until someone notices the missing decorator. ``Depends`` caching means
     the master-key verification underneath still runs once per request however
-    many of these a route pulls in. The three modules that hold an exception
-    (``models.py`` and ``pricing.py`` for the catalog reads, ``usage.py`` for
-    external-event ingestion) put it on a router of its own, so admitting a
-    non-operator is spelled at a router instead of hidden in one route's
-    decorator.
+    many of these a route pulls in. A module that holds an exception (a catalog
+    read, the tool-settings reader, external-event ingestion) puts it on a router
+    of its own, so admitting a non-operator is spelled at a router instead of
+    hidden in one route's decorator.
     """
     if session_identity is not None and not await DeploymentUserService(db).has_administration_access(
         session_identity
@@ -458,14 +482,20 @@ async def verify_catalog_reader(
     """As :func:`verify_api_key_or_master_key`, and a dashboard session also reads.
 
     The narrow exception to the rule above, for the catalog reads that describe
-    the deployment rather than act on it: ``GET /api/v1/models``, ``GET /api/v1/pricing``
-    and ``GET /api/v1/tools`` (with their by-id variants). The dashboard's Models and
-    Pricing pages are built on these, so a session has to reach them; they call
-    no provider, write nothing, and bill nothing, so reaching them
-    deployment-wide costs a signed-in caller's own organization nothing.
+    the deployment rather than act on it: ``GET /api/v1/models``, ``GET /api/v1/pricing``,
+    ``GET /api/v1/tools`` and ``GET /api/v1/providers/catalog`` (with their by-id
+    variants). The dashboard's Models and Pricing pages are built on these, so a
+    session has to reach them; they call no provider, write nothing, and bill
+    nothing, so reaching them deployment-wide costs a signed-in caller's own
+    organization nothing.
+
+    The provider catalog is the one of these a *tenant* rather than an operator
+    needs: it names the providers any-llm knows, which the organization
+    provider-key form offers as the BYO choices, so an owner or admin who reaches
+    no operator route still has to read it.
 
     Split out rather than left as a branch inside the other dependency so that
-    adding a route to this plane defaults to refusing the cookie. The three
+    adding a route to this plane defaults to refusing the cookie. The four
     routers that serve these reads declare it on the router for the same reason,
     so admitting a session is spelled where the route is mounted rather than in
     one route's decorator.
@@ -473,6 +503,45 @@ async def verify_catalog_reader(
     if session_identity is not None:
         return None, True
     return await verify_api_key_or_master_key(request, db, config)
+
+
+async def verify_catalog_reader_or_public(
+    request: Request,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    config: Annotated[GatewayConfig, Depends(get_config)],
+    session_identity: Annotated[TenancyUser | None, Depends(get_session_identity)],
+) -> tuple[APIKey | None, bool] | None:
+    """As :func:`verify_catalog_reader`, and a visitor reads too while the catalog is public.
+
+    ``None`` is the anonymous caller, admitted only while ``public_catalog`` is on
+    and only when the request carries no credential at all: a credential that is
+    present and wrong is refused as it always was, never downgraded to a visitor.
+    The route is what narrows an anonymous read (the configured instances, the
+    deployment price list, no tenant rows); this only decides who is asking.
+
+    Throttled per client address on its own budget,
+    ``public_catalog_rate_limit_per_minute``, the way the public auth routes
+    are on theirs: ``rate_limit_rpm`` keys on an authenticated user and covers
+    no anonymous path, so it is not what stands between an open catalog and a
+    scraper.
+
+    Two things that throttle is not, both documented beside the setting in
+    ``docs/configuration.md``. The address is the socket's, and the CLI starts
+    uvicorn without proxy headers, so behind a reverse proxy every visitor
+    shares one bucket; a deployment that terminates TLS elsewhere throttles
+    there. And the counter is per process, so N workers serve N times the
+    configured number.
+    """
+    if session_identity is not None:
+        return None, True
+    if _header_credentials_present(request) or not config.public_catalog:
+        return await verify_api_key_or_master_key(request, db, config)
+    limiter = getattr(request.app.state, "public_catalog_rate_limiter", None)
+    if limiter is not None:
+        # The limiter raises its own 429; the key is the address, since a
+        # visitor has no other identity.
+        limiter.check(request.client.host if request.client is not None else "unknown")
+    return None
 
 
 async def get_db_if_needed(
@@ -483,8 +552,12 @@ async def get_db_if_needed(
         yield None
         return
 
-    async for db in get_db():
-        yield db
+    # A bare ``async for`` leaves ``get_db`` open when an error or cancellation
+    # is thrown in at teardown, so its session would hold a pooled connection
+    # until garbage collection.
+    async with aclosing(get_db()) as sessions:
+        async for db in sessions:
+            yield db
 
 
 async def get_current_identity(
@@ -654,9 +727,33 @@ def get_file_store(request: Request) -> FileStore:
     return store
 
 
+async def _caller_organization_id(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    identity: CurrentIdentity,
+) -> uuid.UUID:
+    """The organization this request acts in.
+
+    A key is minted, listed and revoked inside one organization, and so is a
+    spend identity read, so every deployment-wide route that touches a tenant's
+    rows resolves the caller's organization before it does. A dashboard session
+    names the identity behind it and resolves that identity's active
+    organization, which is what ``POST /api/v1/organizations/me/switch`` moves; a
+    header master key names nobody, resolves the bootstrap operator, and
+    therefore acts in the default organization. That is the same rule
+    ``services/workspace_scope`` already documents for a deployment-wide write,
+    so an operator running several organizations behind one gateway works in the
+    one they are currently in rather than across all of them (otari#817).
+    """
+    return (await OrganizationService(db).get_active_organization_for_user(identity)).id
+
+
+CallerOrganization = Annotated[uuid.UUID, Depends(_caller_organization_id)]
+
+
 __all__ = [
     "BillingPortDep",
     "ContainerDep",
+    "CallerOrganization",
     "CurrentIdentity",
     "EntitlementPortDep",
     "GrowthSignalPortDep",

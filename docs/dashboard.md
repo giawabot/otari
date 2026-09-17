@@ -85,7 +85,11 @@ created. Set `activation_guide: false` to disable the flow for the deployment.
 The workspace view contains day-to-day gateway operations:
 
 - Overview, Activity, and Usage
-- Playground, Models, and Routing
+- Playground, Models, and Routing. Models is the catalog grouped by model: a
+  list of cards with a rail of filters beside it, and a page per model where
+  every offering of it is compared, one per provider, each with its own limits
+  and the price your organization is charged. It is read-only; a rate is set on
+  Model pricing.
 - Tools
 - API keys, providers, and workspace members
 
@@ -111,7 +115,10 @@ default pricing catalog kept to an operator and the organization's own rate
 overrides open to its admins. An override covers a model the organization
 supplies the provider key for; a model reached through one of the deployment's
 own provider instances is priced by the catalog, because the deployment holds
-that credential and settles its upstream bill.
+that credential and settles its upstream bill. For an operator that section
+also shows the update a scheduled genai-prices check has left for review, when
+the defaults were last accepted and by whom, and how far each stored rate sits
+from today's default.
 
 Exact page names and availability can change with deployment mode and installed
 extensions. The running dashboard is the source of truth.

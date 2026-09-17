@@ -85,6 +85,7 @@ from gateway.api.routes._platform import (
     _resolve_platform_mcp_servers,
     _resolve_platform_web_search,
     is_provider_billing_error,
+    record_abandoned_attempt,
     run_platform_attempts,
     upstream_error_message,
     upstream_exception_chain,
@@ -117,12 +118,15 @@ from gateway.core.usage import (
 )
 from gateway.inflight import track_request
 from gateway.log_config import logger
-from gateway.metrics import record_abandoned_attempt, record_cost, record_inline_cost_settlement, record_tokens
+from gateway.metrics import REGISTRY, Histogram
+from gateway.metrics import Counter as PrometheusCounter
 from gateway.model_labeling import relabel_model
-from gateway.models.entities import APIKey, ModelPricing, UsageLog
+from gateway.models.api_keys import APIKey
 from gateway.models.guardrails import GuardrailConfig
 from gateway.models.mcp import McpServerConfig
 from gateway.models.money import to_usd
+from gateway.models.pricing import ModelPricing
+from gateway.models.usage import UsageLog
 from gateway.ports.model_provider_port import HostedAccessDeniedError, ModelProviderPort
 from gateway.rate_limit import RateLimitInfo, check_rate_limit
 from gateway.repositories.sovereignty_repository import list_sovereignty_rows
@@ -195,6 +199,8 @@ from gateway.services.tenancy.workspace_code_execution_policy_service import (
 )
 from gateway.services.tenancy.workspace_mcp_server_service import resolve_workspace_mcp_servers
 from gateway.services.tenancy.workspace_web_search_service import (
+    MAX_WEB_SEARCH_DOMAINS,
+    InvalidStoredWebSearchDomainError,
     narrow_web_search_tool_entry,
     resolve_workspace_web_search_config,
 )
@@ -206,7 +212,8 @@ from gateway.services.tool_usage import (
 )
 from gateway.services.upstream_redaction import redact_upstream_message
 from gateway.services.url_safety import UnsafeURLError, validate_mcp_url
-from gateway.services.web_search_backend import WEB_SEARCH_TOOL_NAME, WebSearchNotReachableError
+from gateway.services.web_retrieval_backend import WEB_SEARCH_TOOL_NAME, WebSearchNotReachableError
+from gateway.services.web_retrieval_policy import DomainRuleValidationError, canonicalize_domain_rules
 from gateway.services.web_search_budget import WebSearchBudget
 from gateway.services.workspace_scope import (
     organization_for_workspace_id,
@@ -224,6 +231,46 @@ from gateway.types.session_principal import SessionPrincipal
 
 ResultT = TypeVar("ResultT")
 ChunkT = TypeVar("ChunkT")
+
+TOKENS = PrometheusCounter(
+    "gateway_tokens",
+    "Total number of tokens processed",
+    ["provider", "model", "type"],
+    registry=REGISTRY,
+)
+
+REQUEST_COST_DOLLARS = Histogram(
+    "gateway_request_cost_dollars",
+    "Request cost in USD",
+    ["provider", "model"],
+    registry=REGISTRY,
+)
+
+INLINE_COST_SETTLEMENTS = PrometheusCounter(
+    "gateway_inline_cost_settlements",
+    "Inline platform cost settlement outcomes on the hybrid response path",
+    ["outcome"],
+    registry=REGISTRY,
+)
+
+
+def record_tokens(provider: str, model: str, prompt_tokens: int, completion_tokens: int) -> None:
+    """Record token usage metrics."""
+    if prompt_tokens:
+        TOKENS.labels(provider=provider, model=model, type="input").inc(prompt_tokens)
+    if completion_tokens:
+        TOKENS.labels(provider=provider, model=model, type="output").inc(completion_tokens)
+
+
+def record_cost(provider: str, model: str, cost: float) -> None:
+    """Record request cost."""
+    REQUEST_COST_DOLLARS.labels(provider=provider, model=model).observe(cost)
+
+
+def record_inline_cost_settlement(outcome: str) -> None:
+    """Record an attached, unattached, or timed-out inline settlement."""
+    INLINE_COST_SETTLEMENTS.labels(outcome=outcome).inc()
+
 
 # ---------------------------------------------------------------------------
 # Shared wire-level detail strings. These are client-visible API contract
@@ -295,6 +342,11 @@ SANDBOX_IMAGE_NOT_ALLOWED_DETAIL = "this workspace's code-execution policy pins 
 MALFORMED_CODE_EXEC_POLICY_DETAIL = "Authorization service returned a malformed code-execution policy"
 CODE_EXEC_POLICY_UNRESOLVABLE_DETAIL = "Code execution policy could not be resolved for this request"
 WEB_SEARCH_CONFIG_UNRESOLVABLE_DETAIL = "Web search configuration could not be resolved for this request"
+WEB_SEARCH_CONFIG_INVALID_DETAIL = "Web search configuration contains an invalid domain rule"
+WEB_SEARCH_REQUEST_DOMAIN_INVALID_DETAIL = (
+    "Web search allowed_domains and blocked_domains must each contain at most "
+    f"{MAX_WEB_SEARCH_DOMAINS} bare valid hostnames"
+)
 ORGANIZATION_GUARDRAILS_UNRESOLVABLE_DETAIL = "Organization guardrails could not be resolved for this request"
 ORGANIZATION_GUARDRAIL_CREDENTIAL_UNREADABLE_DETAIL = (
     "A configured organization guardrail's credential could not be read"
@@ -2523,6 +2575,19 @@ async def _resolve_mcp_server_ids(
         raise adapter.error(500, MCP_SERVER_TOKEN_UNREADABLE_DETAIL, ErrorKind.API) from exc
 
 
+def _canonicalize_web_search_request_domains(tool_entry: dict[str, Any]) -> None:
+    """Validate and canonicalize caller-supplied Search domain rules in place."""
+    for field in ("allowed_domains", "blocked_domains"):
+        values = tool_entry.get(field)
+        if values is None:
+            continue
+        if not isinstance(values, list) or len(values) > MAX_WEB_SEARCH_DOMAINS:
+            raise DomainRuleValidationError(f"{field} must contain at most {MAX_WEB_SEARCH_DOMAINS} hostnames")
+        if any(not isinstance(value, str) for value in values):
+            raise DomainRuleValidationError(f"{field} must be a list of hostnames")
+        tool_entry[field] = [rule.value for rule in canonicalize_domain_rules(values)]
+
+
 async def prepare_gateway_tools(
     *,
     adapter: FormatAdapter[Any, Any],
@@ -2762,6 +2827,14 @@ async def prepare_gateway_tools(
                 raise adapter.error(400, WEB_SEARCH_NOT_CONFIGURED_DETAIL, ErrorKind.INVALID_REQUEST)
             if use_sandbox or mcp_servers:
                 raise adapter.error(400, WEB_SEARCH_CONFLICT_DETAIL, ErrorKind.INVALID_REQUEST)
+            try:
+                _canonicalize_web_search_request_domains(web_search_tool_entry)
+            except DomainRuleValidationError as exc:
+                raise adapter.error(
+                    400,
+                    WEB_SEARCH_REQUEST_DOMAIN_INVALID_DETAIL,
+                    ErrorKind.INVALID_REQUEST,
+                ) from exc
             use_web_search = True
 
             # Both modes carry a per-workspace web-search configuration (whether
@@ -2841,7 +2914,10 @@ async def prepare_gateway_tools(
                     # says `enabled=False`, silently, on the day one of those
                     # invariants stops holding.
                     raise adapter.error(500, WEB_SEARCH_CONFIG_UNRESOLVABLE_DETAIL, ErrorKind.API)
-                workspace_search = await resolve_workspace_web_search_config(ctx.db, ctx.workspace_id)
+                try:
+                    workspace_search = await resolve_workspace_web_search_config(ctx.db, ctx.workspace_id)
+                except InvalidStoredWebSearchDomainError as exc:
+                    raise adapter.error(503, WEB_SEARCH_CONFIG_INVALID_DETAIL, ErrorKind.API) from exc
                 if workspace_search is not None:
                     if not workspace_search.enabled:
                         raise adapter.error(403, WEB_SEARCH_NOT_ENABLED_DETAIL, ErrorKind.PERMISSION)
@@ -3000,6 +3076,20 @@ def _elapsed_ms(started_at: float | None) -> int | None:
     return round((time.monotonic() - started_at) * 1000)
 
 
+def _ttft_ms(started_at: float | None, first_chunk_at: float | None) -> int | None:
+    """Milliseconds between ``started_at`` and the first streamed chunk.
+
+    Unlike ``_elapsed_ms`` this is not measured against "now": time-to-first-token
+    is fixed the moment the first chunk arrives, and every settlement callback
+    (on_complete, on_no_usage, on_error, on_incomplete) fires after the stream has
+    finished, when "now" is the wrong end of the interval. None when no chunk ever
+    arrived (a stream that failed before yielding anything has no TTFT to record).
+    """
+    if started_at is None or first_chunk_at is None:
+        return None
+    return round((first_chunk_at - started_at) * 1000)
+
+
 async def log_usage(
     db: AsyncSession,
     log_writer: LogWriter,
@@ -3014,6 +3104,7 @@ async def log_usage(
     status_code: int | None = None,
     cost_override: Decimal | float | None = None,
     latency_ms: int | None = None,
+    ttft_ms: int | None = None,
     counts_toward_budget: bool = True,
     attribution: RoutingAttribution | None = None,
     tool_tally: ToolUsageTally | None = None,
@@ -3056,6 +3147,8 @@ async def log_usage(
         cost_override: Fixed amount to record when billing without provider usage
         latency_ms: Total server-side request duration in milliseconds, or None
             when the caller has no meaningful duration to record
+        ttft_ms: Milliseconds from request start to the first streamed chunk, or
+            None for a non-streaming request or a stream that never yielded one
         attribution: Which routing policy produced this row and where in its plan,
             or None for a request that named a plain model
         workspace_id: The workspace already resolved for this request (from
@@ -3086,6 +3179,7 @@ async def log_usage(
         error_message=error,
         status_code=status_code,
         latency_ms=latency_ms,
+        ttft_ms=ttft_ms,
         counts_toward_budget=counts_toward_budget,
         policy_name=attribution.policy_name if attribution else None,
         selection_reason=attribution.selection_reason if attribution else None,
@@ -3693,6 +3787,11 @@ def build_streaming_response(
       reservation does not leak.
     """
     platform_active = platform_correlation_id is not None
+    first_chunk_at: float | None = None
+
+    def _on_first_chunk() -> None:
+        nonlocal first_chunk_at
+        first_chunk_at = time.monotonic()
 
     def _audit() -> dict | None:
         if residency is None:
@@ -3730,6 +3829,7 @@ def build_streaming_response(
             user_id=user_id,
             usage_override=usage_data,
             latency_ms=_elapsed_ms(started_at),
+            ttft_ms=_ttft_ms(started_at, first_chunk_at),
             counts_toward_budget=_handle_counts_toward_budget(reservation),
             attribution=attribution,
             tool_tally=tool_tally,
@@ -3776,6 +3876,7 @@ def build_streaming_response(
                 endpoint=adapter.endpoint,
                 user_id=user_id,
                 latency_ms=_elapsed_ms(started_at),
+                ttft_ms=_ttft_ms(started_at, first_chunk_at),
                 counts_toward_budget=reservation.counts_toward_budget,
                 attribution=attribution,
                 tool_tally=tool_tally,
@@ -3804,6 +3905,7 @@ def build_streaming_response(
             error="stream completed without usage data" if policy == "fail" else None,
             cost_override=reservation.estimate,
             latency_ms=_elapsed_ms(started_at),
+            ttft_ms=_ttft_ms(started_at, first_chunk_at),
             counts_toward_budget=reservation.counts_toward_budget,
             attribution=attribution,
             tool_tally=tool_tally,
@@ -3850,6 +3952,7 @@ def build_streaming_response(
             error=str(exc),
             status_code=failure_status_code(exc),
             latency_ms=_elapsed_ms(started_at),
+            ttft_ms=_ttft_ms(started_at, first_chunk_at),
             counts_toward_budget=_handle_counts_toward_budget(reservation),
             attribution=attribution,
             tool_tally=tool_tally,
@@ -3887,6 +3990,7 @@ def build_streaming_response(
                 user_id=user_id,
                 error="client disconnected before the stream completed",
                 latency_ms=_elapsed_ms(started_at),
+                ttft_ms=_ttft_ms(started_at, first_chunk_at),
                 counts_toward_budget=_handle_counts_toward_budget(reservation),
                 tool_tally=tool_tally,
                 workspace_id=workspace_id,
@@ -3929,6 +4033,7 @@ def build_streaming_response(
             settle_before_done=platform_active,
             is_cost_carrier=adapter.is_stream_cost_carrier if platform_active else None,
             attach_settlement=_attach_inline_cost if platform_active else None,
+            on_first_chunk=_on_first_chunk,
         ),
         media_type="text/event-stream",
         headers=headers,

@@ -29,8 +29,9 @@ from sqlmodel import col
 from conftest import seed_workspace_id
 from gateway.core.metered_pricing import calculate_metered_cost
 from gateway.core.usage import GatewayUsage
-from gateway.models.entities import ModelPricing, OrganizationModelPricing, UsageLog
+from gateway.models.pricing import ModelPricing, OrganizationModelPricing
 from gateway.models.tenancy import Organization
+from gateway.models.usage import UsageLog
 from gateway.services.pricing_service import default_model_pricing
 
 # Rates an operator's price list actually holds, taken from the catalog the
@@ -277,11 +278,18 @@ def test_the_migration_round_trips_on_postgresql_with_rows_in_the_table(
         command.downgrade(config, _BEFORE_MONEY)
         command.upgrade(config, _MONEY_REVISION)
 
-        stored = test_db.execute(select(ModelPricing)).scalars().one()
-        # One column rather than the whole entity: the mapped class tracks the
+        # Columns rather than the whole entity: the mapped class tracks the
         # current schema and this database is pinned to an older revision, so
         # loading every mapped column would fail on whichever column was added
-        # after this one. The typed ``cost`` column is what the assertion is about.
+        # after this one. The typed rate and ``cost`` columns are what the
+        # assertion is about.
+        stored = test_db.execute(
+            select(
+                ModelPricing.input_price_per_million,
+                ModelPricing.cache_read_price_per_million,
+                ModelPricing.cache_write_price_per_million,
+            )
+        ).one()
         settled_cost = test_db.execute(select(UsageLog.cost).where(UsageLog.id == "round-trip")).scalar_one()
 
         assert stored.input_price_per_million == Decimal("3")

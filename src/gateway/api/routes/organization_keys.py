@@ -58,9 +58,10 @@ from gateway.api.routes.keys import (
 )
 from gateway.auth.models import generate_api_key, hash_key, key_prefix, key_suffix
 from gateway.core.config import GatewayConfig
-from gateway.models.entities import APIKey, User
+from gateway.models.api_keys import APIKey
 from gateway.models.tenancy import User as TenancyUser
 from gateway.models.tenancy import Workspace
+from gateway.models.users import User
 from gateway.ports.growth_signal_port import GrowthActivationEvent
 from gateway.repositories.users_repository import get_or_create_attribution_user
 from gateway.services.model_access import is_allowlist_subset, validate_allowed_models
@@ -165,7 +166,7 @@ async def create_own_key(
     The member-scoped counterpart of ``POST /api/v1/keys``: the owner is always the
     caller's own attribution user, the key is always budget-enforced, and the
     workspace must be visible to the caller (a member of it, or an organization
-    owner/admin/superuser, who see every workspace). The secret is returned once.
+    owner/admin, who see every workspace). The secret is returned once.
     """
     organizations = OrganizationService(db)
     organization = await organizations.get_active_organization_for_user(identity)

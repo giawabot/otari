@@ -1,5 +1,5 @@
 import { Button } from "@heroui/react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 import { FiEdit2, FiTrash2 } from "react-icons/fi"
 
 import type { OrganizationPricingOverride } from "@/client"
@@ -11,13 +11,15 @@ import { InfoBanner } from "@/design-system/feedback/InfoBanner"
 import { Dot } from "@/design-system/indicators/Dot"
 import { Section } from "@/design-system/layout/Section"
 import { TableScrollFrame } from "@/design-system/layout/TableScrollFrame"
+import { UNIT_LABELS } from "@/features/pricing/units"
 import { useModels } from "@/shared/api/models"
 import { useOrganizationContext } from "@/shared/api/organizations"
 import {
   useDeleteOrganizationPricing,
   useOrganizationPricing,
 } from "@/shared/api/pricing"
-import { formatCost, formatDateTime } from "@/shared/helpers/format"
+import { formatDateTime, formatRate } from "@/shared/helpers/format"
+import { useUrlValue } from "@/shared/helpers/urlState"
 import { PricingOverrideDialog } from "./PricingOverrideDialog"
 import {
   deploymentManagedPrefixes,
@@ -65,15 +67,14 @@ const STATUS_DOT: Record<ReturnType<typeof overrideStatus>, string> = {
 }
 
 function rate(value: number | null | undefined): string {
-  // `formatCost` is the page's one money formatter, shared with the catalog
-  // table above so the same quantity cannot render two ways on one page. The
-  // absent check stays in front of it rather than being folded into it: a blank
-  // optional rate means the tokens are priced as fresh input, and `formatCost`
-  // renders null as "$0.00", which would claim the organization negotiated a
-  // free cache read. The em dash is the glyph the catalog column already uses
-  // for the same "no rate stored" state.
+  // `formatRate`, the one formatter for a per-million rate, shared with the
+  // catalog table above so the same quantity cannot render two ways on one
+  // page. The absent check stays in front of it: a blank optional rate means
+  // the tokens are priced as fresh input, and rendering it as $0.00 would claim
+  // the organization negotiated a free cache read. The em dash is the glyph the
+  // catalog column already uses for the same "no rate stored" state.
   if (value === null || value === undefined) return "—"
-  return formatCost(value)
+  return formatRate(value)
 }
 
 function period(override: OrganizationPricingOverride): string {
@@ -121,6 +122,20 @@ export function RateOverridesCard() {
     setDialogOpen(true)
   }
 
+  // The catalog's "Set your rate" link lands here with the selector in
+  // `?override=`, so an admin who may not set a deployment price still gets
+  // from a row they were comparing to the one editor that is theirs.
+  const requestedKey = useUrlValue("override")
+  useEffect(() => {
+    if (requestedKey && canEdit) {
+      // Bumped like the two openers below it: the dialog seeds its draft on
+      // mount, so an open that does not remount would show a blank model key.
+      setOpenCount((count) => count + 1)
+      setEditing(undefined)
+      setDialogOpen(true)
+    }
+  }, [requestedKey, canEdit])
+
   const openEdit = (override: OrganizationPricingOverride) => {
     setOpenCount((count) => count + 1)
     setEditing(override)
@@ -157,6 +172,13 @@ export function RateOverridesCard() {
       header: "Cache write / 1M",
       align: "end",
       cell: (row) => rate(row.cache_write_price_per_million),
+    },
+    {
+      id: "unit",
+      header: "Per 1M",
+      cell: (row) => (
+        <span className="text-muted">{UNIT_LABELS[row.unit] ?? row.unit}</span>
+      ),
     },
     {
       id: "period",
@@ -281,6 +303,7 @@ export function RateOverridesCard() {
         isOpen={isDialogOpen}
         onOpenChange={setDialogOpen}
         editing={editing}
+        initialModelKey={requestedKey}
         existing={rows}
         onSaved={() => setDialogOpen(false)}
       />

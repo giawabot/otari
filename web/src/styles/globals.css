@@ -1321,16 +1321,13 @@ body {
  * with the input, because the two sit in the same row on six pages and
  * currently agree.
  *
- * 40px is the form size: a field somebody fills in. 38px is the dense size, and
+ * 36px is the form size: a field somebody fills in. 32px is the dense size, and
  * it exists for one reason: a filter control above a table sits on the table's
- * own header row, and a 40px control outgrows it. Dense is opted into by
- * PLACE, not per field, which is what `.otari-toolbar` is for. A call site says
+ * own header row. Dense is opted into by PLACE, not per field, which is what
+ * `.otari-toolbar` is for. A call site says
  * "this row is a toolbar" and every control in it takes the smaller size; no
  * site picks a height.
  *
- * `min-height` rather than new padding: an input centers its text in the
- * content box, so growing the box keeps the text centered without a second
- * number to keep in step with the first.
  * ============================================================= */
 /* 36 in a form, 32 in a dense place. `padding-block` alongside the floor is
    what actually moves them: HeroUI's own 8px padding plus its 20px line box
@@ -1346,8 +1343,8 @@ body {
    own field, so a control that legitimately wanted the form height inside a
    toolbar had no way to ask. A custom property inherits instead of winning, so
    the place still sets the density for everything inside it and any subtree can
-   reset it. `Toolbar` and `TablePagination` are the two components that own a
-   place; each names its class in a comment pointing here.
+   reset both variables. `Toolbar`, `TablePagination`, and bounded
+   `SettingsGroup` declare these places.
    
    Textarea keeps the floor and no height, since it is the one field that should
    grow. Note that `textarea.input` has no call site: HeroUI's own TextArea
@@ -1378,11 +1375,16 @@ textarea.input {
   min-height: var(--field-height);
   padding-block: var(--field-padding-block);
 }
-/* The three dense places. `input[type="search"]` needs its own rule because it is
-   a native element carrying none of HeroUI's classes, and it stays scoped to
-   the toolbar: the only two in the tree are toolbar search boxes, and pulling a
-   bare search input into the family would restyle a control nothing here
-   renders. */
+/* The three dense places. A toolbar and a pagination strip are dense because
+   their controls share compact rows above or below a table; a settings row is dense
+   because its control sits in a lane beside the label it explains, and at the
+   form height every row comes out taller than its own sentence, so a column of
+   them reads as a stack of boxes.
+
+   `input[type="search"]` needs its own rule because it is a native element
+   carrying none of HeroUI's classes, and it stays scoped to the toolbar: the
+   only two in the tree are toolbar search boxes, and pulling a bare search
+   input into the family would restyle a control nothing here renders. */
 .otari-toolbar,
 .otari-pagination,
 .otari-settings {
@@ -1773,19 +1775,68 @@ main {
    and a table row's Edit and Delete are `RowAction`, a plain caption button
    that is not part of this family at all. A place nobody consumes is a place
    that goes stale, so it is not carried.
+   `.otari-setup-actions` is the one that names a place holding a single button
+   rather than a row: the first-run sheet's Skip, quieted so the screen's one
+   way out does not compete with the request the screen is asking for.
    The last selector is the one exception to place, and it is deliberate: an
    icon-only ghost never takes the edge, wherever it renders. `CopyButton` is
    why. It appears inside tables, inside the models detail panel, inside
    banners and standalone on a page, so no container can reach it, and a rule
    keyed on what the control IS cannot be forgotten by a call site either. */
+/* The playground composer, which is a field the way an input is a field but is
+   built as a frame around a bare textarea: it holds the tool chips, the model
+   picker and send inside its own edge, so the shared `TextArea` would draw a
+   second border within it. Naming it here is what lets it read the same
+   `--field-*` variables every other field reads, rather than a call site
+   reaching for them through an arbitrary class (frontend-standards #2). The
+   border width comes from the token too, so a theme that changes it moves this
+   with the rest. */
+.otari-composer {
+  background: var(--field-background);
+  border-style: solid;
+  border-width: var(--field-border-width);
+  border-color: var(--field-border);
+}
+
 .otari-toolbar .button--ghost,
+.otari-actions .button--ghost,
 .otari-pagination .button--ghost,
 .otari-table .button--ghost,
 .otari-bulk-bar .button--ghost,
 .otari-breakdown .button--ghost,
 .otari-rail .button--ghost,
+.otari-setup-actions .button--ghost,
+.otari-auth-actions .button--ghost,
 .button--ghost.button--icon-only {
   border-color: transparent;
+}
+
+/* The public auth pages' footer row, which holds plain text links and one
+   control that has to be a button: Help opens a popover, and a popover trigger
+   must be a react-aria pressable. So the button takes the links' ink, their
+   44px target and their quiet, and the row reads as one family rather than a box
+   beside a link. The fills go transparent here rather than at the call site,
+   which is the only place `--button-*` is reachable at all.
+   `min-height` is alignment, not a touch target: the floor below 767px already
+   raises every button to 44, and this is what makes the two controls the same
+   height on a desktop, where the link is 44 and an `md` button is 36.
+   The two `:not()`s are specificity, not intent: the padding rule below is
+   three classes deep and comes later in the file, so a selector that does not
+   out-count it loses. Its 15px is the inset a drawn edge eats back; there is no
+   drawn edge here, and the 3px moved the label off where the page shipped it. */
+.otari-auth-actions .button--ghost:not(.button--sm):not(.button--icon-only) {
+  min-height: 2.75rem;
+  padding-inline: 12px;
+  --button-fg: var(--color-link);
+  --button-bg-hover: transparent;
+  --button-bg-pressed: transparent;
+}
+.otari-auth-actions
+  .button--ghost:not(.button--sm):not(.button--icon-only):is(
+    :hover,
+    [data-hovered="true"]
+  ) {
+  --button-fg: var(--color-link-hover);
 }
 
 /* An edge is drawn INSIDE the box, so it eats a pixel of the inset the other
@@ -2050,26 +2101,10 @@ main {
     gap: 8px;
   }
 }
-/* A settings row is the third dense place, after the pagination strip and the
-   toolbar. Its control sits in a lane beside the label it belongs to, and at
-   the form height each row comes out taller than the sentence explaining it, so
-   a column of them reads as a stack of boxes.
-
-   On a phone the control stops sharing the row and stacks full width, and it
-   comes up to 44px with the two places above rather than stopping at the form
-   height: 44px is the floor everywhere, and a dense place that keeps its
-   desktop height there is the one thing `design/motion-and-access.md` says
-   needs an argument in writing. Same 767px boundary as those, so a settings
-   row's fields and the button floor arrive together.
-
-   It takes 16px with it, which is a separate rule from the height: iOS zooms
-   the page when a field under 16px takes focus, and a full-width field is the
-   one shape where that zoom has nowhere to go. */
-/* The dense height and its phone override are declared on the place itself,
-   with the other two, further up this file. What is left here is the one part
-   that is not a height: 16px on the phone, because iOS zooms the page when a
-   field under 16px takes focus and a full-width field is the one shape where
-   that zoom has nowhere to go. */
+/* A settings row's phone size, the one part of it that is not a height: 16px,
+   because iOS zooms the page when a field under 16px takes focus and a
+   full-width field is the one shape where that zoom has nowhere to go. The
+   height is declared on the place above; its phone override is below. */
 @media (max-width: 767px) {
   .otari-settings .input {
     font-size: var(--text-base);
@@ -2105,12 +2140,18 @@ main {
   font-size: var(--text-xs);
 }
 
-/* The dense height above is a desktop size, so the phone viewport takes it
-   back off. The `[data-slot="button"]` floor further down cannot reach these:
-   a native `input[type="search"]` and a HeroUI select trigger are not buttons,
-   so without this the toolbar is the one place on the phone layout still
-   handing a finger a 32px target. Same 767px boundary as that floor, so the
-   toolbar's fields and its buttons come up to 44px together. */
+/* The dense height is a desktop size, so the phone viewport takes it back off.
+   The toolbar and settings fields reach the 44px touch floor here. They have
+   room to grow without overlapping adjacent targets, so keeping them dense
+   would not meet the exception criteria in `design/motion-and-access.md`.
+   The pager reaches 44px in the coarse-pointer query above, independently of
+   viewport width.
+
+   The `[data-slot="button"]` floor further down cannot reach these: a native
+   `input[type="search"]` and a HeroUI select trigger are not buttons, so
+   without this a toolbar or a settings row is the one place on the phone
+   layout still handing a finger a 32px target. Same 767px boundary as that
+   floor, so a place's fields and its buttons come up together. */
 @media (max-width: 767px) {
   .otari-toolbar,
   .otari-settings {
@@ -2294,16 +2335,28 @@ main {
    * `width: fit-content`, so its cross size is never `auto` and stretch cannot
    * reach it. Measured, the two buttons stayed 110px and 83px in a 373px
    * column. HeroUI's `fullWidth` prop is the other way to get here and it is a
-   * prop, so it would take the desktop with it. */
+   * prop, so it would take the desktop with it.
+   *
+   * The wrapped case is spelled out rather than reached with a descendant: the
+   * first-run sheet wraps Skip to name a place (see actions.md) and would
+   * otherwise lose the width and the suppression below, but a plain descendant
+   * would also claim an icon-only button a future slot groups beside a labeled
+   * one, at full width with no press and nothing to fail. The `w-full` utility
+   * that looks like the obvious replacement is keyed on the class rather than
+   * the computed width, so it takes the desktop's press with it. */
   .otari-form-dialog__actions > button,
-  .otari-dialog__actions > button {
+  .otari-dialog__actions > button,
+  .otari-dialog__actions > .otari-setup-actions > button {
     width: 100%;
   }
   /* Full width earns the same press suppression `.button` already gives
    * `.w-full` and HeroUI's `fullWidth` class: the transform displaces a wide
    * button by 7.07px, and this one spans the sheet. */
   .otari-form-dialog__actions > button:is(:active, [data-pressed="true"]),
-  .otari-dialog__actions > button:is(:active, [data-pressed="true"]) {
+  .otari-dialog__actions > button:is(:active, [data-pressed="true"]),
+  .otari-dialog__actions
+    > .otari-setup-actions
+    > button:is(:active, [data-pressed="true"]) {
     transform: none;
   }
   .otari-form-dialog__footer button,
@@ -2676,28 +2729,24 @@ main {
    content on the same pixel, so the lane is given explicit room on its left
    rather than relying on the cell padding both sides already spend. */
 .otari-models-table .otari-table.table-root,
+.otari-offerings-table .otari-table.table-root,
 .otari-domains-table .otari-table.table-root,
 .otari-providers-table .otari-table.table-root,
 .otari-routing-table .otari-table.table-root {
   border-top: 1px solid var(--color-border);
   border-bottom: 1px solid var(--color-border);
 }
-.otari-models-table .table__column[data-key="policy"],
-.otari-models-table .table__cell[data-key="policy"] {
-  padding-left: 20px;
+.otari-models-table .table__column[data-key="name"] {
+  min-width: 200px;
 }
-.otari-models-table .table__column[data-key="provider"] {
-  width: 150px;
-}
-.otari-models-table .table__column[data-key="modalities"] {
-  width: 210px;
-}
-.otari-models-table .table__column[data-key="model"] {
-  min-width: 220px;
+.otari-offerings-table .table__column[data-key="provider"] {
+  min-width: 200px;
 }
 /* The identity lane holds while the rest scrolls, as everywhere else. */
 .otari-models-table .table__column:first-child,
 .otari-models-table .table__row .table__cell:first-child,
+.otari-offerings-table .table__column:first-child,
+.otari-offerings-table .table__row .table__cell:first-child,
 .otari-domains-table .table__column:first-child,
 .otari-domains-table .table__row .table__cell:first-child,
 .otari-providers-table .table__column:first-child,
@@ -2711,6 +2760,10 @@ main {
 }
 .otari-models-table[data-scrolled="true"] .table__column:first-child,
 .otari-models-table[data-scrolled="true"] .table__row .table__cell:first-child,
+.otari-offerings-table[data-scrolled="true"] .table__column:first-child,
+.otari-offerings-table[data-scrolled="true"]
+  .table__row
+  .table__cell:first-child,
 .otari-providers-table[data-scrolled="true"] .table__column:first-child,
 .otari-providers-table[data-scrolled="true"]
   .table__row
@@ -3105,42 +3158,102 @@ main {
 .otari-members-table[data-scrolled="true"] .table__cell[data-key="member"] {
   border-right: 1px solid var(--color-control-border);
 }
+/* Key lanes stay fixed while the name absorbs the available width. */
+.otari-keys-table .table__content {
+  table-layout: fixed;
+  width: 100%;
+}
 .otari-keys-table .table__row .table__cell {
-  height: 58px;
-  padding-block: 0;
+  height: 3.625rem;
+  padding-block: 0.5rem;
+  white-space: nowrap;
+}
+.otari-keys-table .table__column {
+  white-space: nowrap;
+}
+.otari-keys-table .table__column:first-child {
+  width: 3rem;
 }
 .otari-keys-table .table__column[data-key="status"] {
-  width: 120px;
+  width: 7.5rem;
 }
 .otari-keys-table .table__column[data-key="owner"] {
-  width: 170px;
+  width: 10.625rem;
 }
 .otari-keys-table .table__column[data-key="key"] {
-  width: 150px;
+  width: 11.25rem;
 }
 .otari-keys-table .table__column[data-key="created"],
 .otari-keys-table .table__column[data-key="expires"] {
-  width: 110px;
+  width: 6.875rem;
 }
 .otari-keys-table .table__column[data-key="last_used"] {
-  width: 120px;
+  width: 7.5rem;
 }
 .otari-keys-table .table__column[data-key="actions"] {
-  width: 192px;
+  width: 5rem;
 }
-.otari-keys-table .otari-table .otari-detail-row > td {
-  background-color: transparent;
+.otari-key-actions-trigger {
+  padding: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 2.75rem;
+  height: 2.75rem;
+  flex-shrink: 0;
+  color: var(--color-text-muted);
+}
+.otari-key-actions-trigger:hover {
+  color: var(--color-text);
+  background: var(--color-surface-muted);
+}
+/* The ring is `otari-focus-ring` on the trigger; only the offset is local. The
+   trigger is flush with the row's right edge, where the utility's outward 2px
+   would be clipped by the table's own overflow. */
+.otari-key-actions-trigger[data-focus-visible],
+.otari-key-actions-trigger[aria-expanded="true"] {
+  outline: 2px solid var(--focus-ring-ink, var(--color-focus));
+  outline-offset: -2px;
+}
+/* HeroUI has no prop for the menu's density or its two text lanes. */
+.otari-key-actions-menu {
+  width: 16.75rem;
+  max-width: calc(100vw - 2rem);
+}
+.otari-key-actions-menu .dropdown__menu {
+  padding: 0;
+}
+.otari-key-actions-menu .menu-item {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.75rem;
+  padding: 0.5rem 0.75rem;
+  color: var(--color-text-muted);
+}
+.otari-key-actions-menu .menu-item .label {
+  white-space: nowrap;
+}
+.otari-key-actions-menu .menu-item [slot="description"] {
+  margin-left: auto;
+  text-align: right;
+}
+.otari-key-actions-menu .menu-item:last-child {
   border-top: 1px solid var(--color-border-subtle);
-  border-bottom: 1px solid var(--color-border-subtle);
 }
-/* The row above an armed strip gives up its own rule, so the two are one unit
-   rather than two stacked bands. */
-.otari-keys-table .otari-table .table__row:has(+ .otari-detail-row),
-.otari-keys-table .table__row:has(+ .otari-detail-row) .table__cell {
-  border-bottom-color: transparent;
-} /* The header's background and edges are not repeated here: they live with the
-   `.table-root` border they have to counteract, in the divided-surface table
-   block above. */
+.otari-key-actions-menu .menu-item[data-focused],
+.otari-key-actions-menu .menu-item[data-hovered] {
+  background: var(--color-surface-muted);
+}
+@media (min-width: 48rem) and (pointer: fine) {
+  .otari-key-actions-trigger {
+    width: 2rem;
+    height: 2rem;
+  }
+  .otari-key-actions-menu .menu-item {
+    min-height: 2.25rem;
+  }
+}
 .otari-breakdown .table__column[data-key="requests"],
 .otari-breakdown .table__column[data-key="tokens"] {
   width: 110px;
@@ -3256,10 +3369,10 @@ main {
  * between them. That is the standard way to paint a gradient border without a
  * second element.
  *
- * The element's own resting hairline is a real `border`, set by `ScanBorder`,
- * and this pseudo-element is painted over it. So the band still reads as a
- * bordered band when the arc is not running, and the arc is an overlay on that
- * edge rather than a replacement for it.
+ * Painted over whatever edge the element already has rather than in place of
+ * it: `Dialog` sets this on a frame that carries its own 1px border, so the
+ * frame still reads as a bordered frame when the arc is not running. An element
+ * with no edge of its own gets the arc and nothing between sweeps.
  *
  * `--scan-ink` is the traveling arc's color and defaults to the accent; a
  * caller overriding it is how the failed state turns the sweep red without this
@@ -3335,3 +3448,31 @@ main {
    here recorded that their values "had already stopped tracking the scale
    once"; a heading that wears the role cannot drift from it. And `h3`/`h4`,
    hand-spelled at 16/24 semibold, turned out to be `text-title` exactly. */
+
+@theme {
+  /* Match the original activation orb's phase dissolve. */
+  --duration-setup-orb: 420ms;
+  --animate-setup-orb-in: setup-orb-fade-in var(--duration-setup-orb) ease-out;
+  --animate-setup-orb-out: setup-orb-fade-out var(--duration-setup-orb) ease-out
+    forwards;
+  @keyframes setup-orb-fade-in {
+    from {
+      opacity: 0;
+      transform: scale(0.94);
+    }
+    to {
+      opacity: 1;
+      transform: scale(1);
+    }
+  }
+  @keyframes setup-orb-fade-out {
+    from {
+      opacity: 1;
+      transform: scale(1);
+    }
+    to {
+      opacity: 0;
+      transform: scale(1.06);
+    }
+  }
+}

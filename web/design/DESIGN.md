@@ -64,8 +64,8 @@ for a component, not for those.
 | `metrics/SeverityMark` | `SeverityMark`, and the `Severity` type |
 | `metrics/TrendChip` | `TrendChip`, `trendState`, and the `Trend*` types |
 | `metrics/charts` | `TrendChart`, `Sparkline`, `ChartLegend`, and the `SeriesDef` / `StackedPoint` types |
-| `feedback/ErrorBanner` · `/InfoBanner` · `/EmptyState` · `/EmptyMessage` · `/PageLoading` · `/PageError` · `/ConfirmDialog` · `/FormDialog` · `/ScanBorder` · `/ErrorBoundary` · `/Skeleton` · `/errorMessage` | one each |
-| `feedback/Dialog` | `Dialog`, `DialogSection`, and the `DialogSize` type |
+| `feedback/ErrorBanner` · `/InfoBanner` · `/EmptyState` · `/EmptyMessage` · `/PageLoading` · `/PageError` · `/ConfirmDialog` · `/FormDialog` · `/ErrorBoundary` · `/Skeleton` · `/errorMessage` | one each |
+| `feedback/Dialog` | `Dialog`, `DialogSection`, and the `DialogSize` / `ScanTone` types |
 | `forms/Field` · `/SecretField` · `/TextArea` · `/SearchField` · `/FieldAction` | one component each |
 | `forms/Select` | `Select`, and the `SelectOption` type |
 | `forms/ComboBoxField` | `ComboBoxField`, and the `ComboBoxOption` type |

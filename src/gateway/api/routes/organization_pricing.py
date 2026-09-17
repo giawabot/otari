@@ -20,23 +20,23 @@ order (override, deployment row, genai-prices dataset) is
 
 import uuid
 from datetime import UTC, datetime
-from typing import Annotated
+from typing import Annotated, Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gateway.api.deps import CurrentIdentity, get_config, get_db, verify_master_key
+from gateway.api.deps import CurrentIdentity, ModelProviderPortDep, get_config, get_db, verify_master_key
+from gateway.core.config import GatewayConfig
+from gateway.models.money import as_float
+from gateway.models.pricing import OrganizationModelPricing
 
 # The tier shape comes from the deployment pricing route rather than a second
 # copy here. An override resolves into a transient ``ModelPricing`` and is read by
 # the same cost-math core, so a tier that meant something different on this
 # surface would be a silent mispricing.
-from gateway.api.routes.pricing import PricingTier
-from gateway.core.config import GatewayConfig
-from gateway.models.entities import OrganizationModelPricing
-from gateway.models.money import as_float
+from gateway.models.pricing_schemas import PricingTier
 from gateway.services.organization_pricing_service import (
     OrganizationPricingService,
     PricingOverrideInput,
@@ -96,6 +96,10 @@ class OrganizationModelPricingRates(BaseModel):
     )
     effective_from: datetime | None = Field(default=None, description=_EFFECTIVE_FROM_DESCRIPTION)
     effective_to: datetime | None = Field(default=None, description=_EFFECTIVE_TO_DESCRIPTION)
+    unit: Literal["tokens", "requests", "images"] = Field(
+        default="tokens",
+        description="What the rates are per: tokens for a model, requests or images for a non-token endpoint.",
+    )
 
     @model_validator(mode="after")
     def validate_unique_tier_thresholds(self) -> "OrganizationModelPricingRates":
@@ -163,6 +167,7 @@ class OrganizationModelPricingPublic(BaseModel):
     cache_write_price_per_million: float | None
     cache_write_1h_price_per_million: float | None
     pricing_tiers: list[PricingTier]
+    unit: str
     effective_from: datetime
     effective_to: datetime | None
     created_at: datetime
@@ -183,6 +188,7 @@ class OrganizationModelPricingPublic(BaseModel):
             cache_write_price_per_million=as_float(override.cache_write_price_per_million),
             cache_write_1h_price_per_million=as_float(override.cache_write_1h_price_per_million),
             pricing_tiers=[PricingTier.model_validate(tier) for tier in override.pricing_tiers or []],
+            unit=override.unit or "tokens",
             effective_from=override.effective_from,
             effective_to=override.effective_to,
             created_at=override.created_at,
@@ -206,9 +212,10 @@ class OrganizationModelPricingsPublic(BaseModel):
 def get_organization_pricing_service(
     db: Annotated[AsyncSession, Depends(get_db)],
     config: Annotated[GatewayConfig, Depends(get_config)],
+    model_provider: ModelProviderPortDep,
 ) -> OrganizationPricingService:
-    """Build the pricing service on the request's session and provider map."""
-    return OrganizationPricingService(db, config)
+    """Build the pricing service on the request's session, provider map, and hosted-credential port."""
+    return OrganizationPricingService(db, config, model_provider=model_provider)
 
 
 ServiceDep = Annotated[OrganizationPricingService, Depends(get_organization_pricing_service)]
@@ -230,6 +237,7 @@ def _to_input(body: OrganizationModelPricingRates) -> PricingOverrideInput:
         pricing_tiers=[tier.model_dump(exclude_none=True) for tier in body.pricing_tiers or []],
         effective_from=body.effective_from or datetime.now(tz=UTC),
         effective_to=body.effective_to,
+        unit=body.unit,
     )
 
 
@@ -301,9 +309,12 @@ async def create_organization_pricing(
 
     Refused with a 409 when the period overlaps one already stored for that model,
     naming the period it collides with, rather than shadowing it. Refused with a
-    403 when the model is addressed through one of the deployment's own provider
-    instances: the deployment holds that credential and settles its upstream bill,
-    so its rate is the deployment price list's rather than a tenant's.
+    403 when the deployment, not the caller's organization, holds the credential
+    that serves the model, whether through one of its own provider instances or a
+    hosted credential the bound port supplies because no usable BYO credential of
+    the organization's own covers every one of its workspaces: either way the
+    deployment settles the upstream bill, so its rate is the deployment price
+    list's rather than a tenant's.
 
     The key is normalized to its canonical ``instance:model`` form first, the same
     call ``POST /api/v1/pricing`` makes, and that is what makes one model one row

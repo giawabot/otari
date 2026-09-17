@@ -28,7 +28,7 @@ from sqlalchemy.orm import Session
 from sqlmodel import SQLModel
 
 import gateway.models  # noqa: F401  (registers every table on the shared metadata)
-from gateway.models.entities import UsageLog
+from gateway.models.usage import UsageLog
 
 _ALEMBIC_DIR = Path(__file__).resolve().parents[2] / "alembic"
 _PROVENANCE_REVISION = "a9c4e2b6d8f1"
@@ -182,11 +182,14 @@ def test_the_revision_round_trips(sqlite_at_head: tuple[Config, Engine]) -> None
     columns = _columns(engine)
     assert set(_EXPECTED_TYPES) <= set(columns)
     with engine.connect() as connection:
-        # Raw SQL again: the database is pinned at the provenance revision,
-        # which predates columns the current model declares (residency_audit),
-        # so the mapped class cannot read this schema.
-        row = connection.execute(
-            text("SELECT pricing_source, pricing_reference, pricing_version FROM usage_logs WHERE id = 'settled-1'")
-        ).one()
+        # Raw SQL again: revisions after this one add further usage_logs
+        # columns (residency_audit, ttft_ms), so the mapped class now
+        # tracks columns this revision does not have yet and
+        # session.get(UsageLog, ...) would select one that is not there.
+        row = (
+            connection.execute(text(f"SELECT {', '.join(_EXPECTED_TYPES)} FROM usage_logs WHERE id = 'settled-1'"))
+            .mappings()
+            .one()
+        )
     # The provenance went with the columns; nothing backfills it.
-    assert all(value is None for value in row)
+    assert all(value is None for value in row.values())

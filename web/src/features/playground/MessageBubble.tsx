@@ -6,17 +6,16 @@ import {
 } from "react"
 import { FiRotateCcw } from "react-icons/fi"
 import type { Components } from "react-markdown"
-
 import { CopyButton } from "@/design-system/actions/CopyButton"
 import { IconButton } from "@/design-system/actions/IconButton"
 import { CodeBlock } from "@/design-system/content/CodeBlock"
 import { Markdown } from "@/design-system/content/Markdown"
-import { Tooltip } from "@/design-system/overlays/Tooltip"
-
+import { ErrorBanner } from "@/design-system/feedback/ErrorBanner"
 import { parseThinkTags } from "./helpers/parseThinkTags"
-import { formatTurnStats } from "./helpers/playgroundCost"
+import { splitModelKey } from "./helpers/playgroundModels"
 import type { ChatTurn } from "./helpers/playgroundTypes"
 import { ThinkingBlock } from "./ThinkingBlock"
+import { TurnReadout } from "./TurnReadout"
 
 /**
  * A fenced block in a model's answer, routed through the shared `CodeBlock`.
@@ -64,19 +63,13 @@ const ANSWER_MARKDOWN: Components = {
   ),
 }
 
-/**
- * One turn of the conversation.
- *
- * A question is a bubble on the right, because it is short and the reader wrote
- * it. An answer is full width with no bubble at all: it is the thing being read,
- * often long and often containing a code fence, and a tinted container around
- * it both narrows the measure and fights the fence's own frame.
- */
 export function MessageBubble({
   turn,
+  model,
   onRegenerate,
   areActionsVisible = true,
 }: {
+  model: string
   turn: ChatTurn
   /** Given only on the latest finished answer. */
   onRegenerate?: () => void
@@ -85,11 +78,11 @@ export function MessageBubble({
 }) {
   if (turn.role === "user") {
     return (
-      <div className="flex justify-end">
-        <div className="max-w-[85%] rounded-lg bg-primary-subtle px-4 py-3 text-primary-subtle-foreground">
-          <p className="whitespace-pre-wrap text-sm">{turn.content}</p>
-        </div>
-      </div>
+      <article aria-label="Your message" className="flex justify-end">
+        <p className="max-w-[35rem] whitespace-pre-wrap break-words bg-surface-alt px-4 py-3 text-base leading-[1.625rem]">
+          {turn.content}
+        </p>
+      </article>
     )
   }
 
@@ -97,9 +90,16 @@ export function MessageBubble({
   // A model streams reasoning in a field of its own or inline in `<think>`
   // tags, never both, so whichever arrived goes in the same block.
   const reasoning = turn.reasoning ?? inlineThinking
+  const identity = splitModelKey(model)
 
   return (
-    <div className="group flex flex-col gap-1">
+    <div className="flex min-w-0 flex-col gap-3 break-words">
+      <div className="flex flex-wrap items-baseline gap-2">
+        <p className="text-emphasis">{identity.label}</p>
+        {identity.instance ? (
+          <span className="text-caption text-subtle">{identity.instance}</span>
+        ) : null}
+      </div>
       {reasoning ? <ThinkingBlock content={reasoning} /> : null}
       {response ? (
         <Markdown components={ANSWER_MARKDOWN}>{response}</Markdown>
@@ -108,32 +108,31 @@ export function MessageBubble({
         // Inline rather than a toast: a failure belongs where the answer would
         // have been, so a transcript still reads in order afterwards and a
         // failure scrolled past is still findable.
-        <p className="text-sm text-danger">{turn.errorMessage}</p>
+        <ErrorBanner error={new Error(turn.errorMessage)} />
       ) : null}
-      {turn.usage ? (
-        <p className="text-caption">{formatTurnStats(turn.usage)}</p>
-      ) : null}
-      {/* Shown for a failed turn too, not only a successful one. A stream that
-          died before its first token leaves `content` empty, so gating on the
-          response alone hid the whole row at the one moment somebody wants
-          Regenerate. Copy still needs something to copy. */}
-      {areActionsVisible && (response || turn.errorMessage) ? (
-        // Always visible on a touch screen and revealed on hover from `md` up:
-        // a hover-only control is unreachable on a phone, which the
-        // responsiveness rule forbids outright.
-        <div className="flex items-center gap-1 opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:group-focus-within:opacity-100">
-          {response ? (
-            <CopyButton value={response} label="Copy response" />
-          ) : null}
-          {onRegenerate ? (
-            <Tooltip content="Regenerate">
-              <IconButton label="Regenerate response" onPress={onRegenerate}>
-                <FiRotateCcw aria-hidden className="size-4" />
+      <div className="flex flex-wrap items-center justify-between gap-x-4 gap-y-2 pt-1">
+        {areActionsVisible && (response || turn.errorMessage) ? (
+          <div className="otari-actions flex shrink-0 items-center gap-3">
+            {response ? <CopyButton value={response} label="response" /> : null}
+            {onRegenerate ? (
+              <IconButton
+                isIconOnly
+                size="sm"
+                label="Regenerate response"
+                className="md:min-h-8 md:min-w-8"
+                onPress={onRegenerate}
+              >
+                <FiRotateCcw aria-hidden className="size-3.5" />
               </IconButton>
-            </Tooltip>
-          ) : null}
-        </div>
-      ) : null}
+            ) : null}
+          </div>
+        ) : null}
+        {turn.usage ? (
+          <div className="ml-auto">
+            <TurnReadout usage={turn.usage} />
+          </div>
+        ) : null}
+      </div>
     </div>
   )
 }

@@ -82,6 +82,8 @@ export function pricingResponse(
     cache_write_price_per_million: null,
     cache_write_1h_price_per_million: null,
     pricing_tiers: [],
+    unit: "tokens",
+    origin: "api",
     created_at: "2026-01-01T00:00:00Z",
     updated_at: "2026-01-01T00:00:00Z",
     ...overrides,
@@ -156,6 +158,9 @@ export function bootstrap(
     // clearing a list it does not care about.
     oauth_providers: [],
     mail_ready: false,
+    // Off by default, matching the config default; the public-catalog tests
+    // turn it on.
+    public_catalog: false,
     // Closed, matching the default posture: the signup tests that want
     // registration turn it on rather than every other test turning it off.
     open_signup: false,
@@ -194,6 +199,8 @@ export function organizationContext(
       user_id: "33333333-3333-3333-3333-333333333333",
       email: null,
       full_name: "Operator",
+      has_password: false,
+      claims_deployment: true,
     },
     role: "owner",
     status: "active",
@@ -618,6 +625,9 @@ export function orgProviderKey(
     // the server and only the tail of the key is ever published.
     last4: "abcd",
     is_org_default: false,
+    // The default is a key this deployment can actually read. A test wanting the
+    // other case says so, because that is the state the dashboard has to show.
+    usable: true,
     archived_at: null,
     created_at: "2026-08-24T00:00:00+00:00",
     updated_at: null,
@@ -638,6 +648,7 @@ export function workspaceProviderKeyOverride(
     disabled: false,
     is_effective_default: true,
     is_effective_enabled: true,
+    usable: true,
     // Empty is the answer "every model this key serves", never "no model".
     allowed_models: [],
     ...overrides,
