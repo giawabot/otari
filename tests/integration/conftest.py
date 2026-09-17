@@ -77,15 +77,43 @@ def _reset_engine(database_url: str) -> Engine:
 
 
 def _build_reset_plan(database_url: str) -> _ResetPlan:
-    """Record the schema's tables, and whatever the migrations seeded into them."""
+    """Record the schema's tables, and whatever the migrations seeded into them.
+
+    Seeded tables are ordered so a table's FK parents come before it: the
+    reset re-inserts the migration-seeded rows in one transaction, and a
+    child row inserted ahead of its parent trips the FK. Reflection order is
+    a heap-scan artifact, not a dependency order, and it flips as the
+    migration chain grows, so the plan sorts explicitly. The cycle guard
+    (mark-before-recurse) keeps a mutual FK from looping; no seeded pair in
+    this schema is mutually dependent, so the guard never picks a bad order.
+    """
     with _reset_engine(database_url).connect() as conn:
-        tables = [name for name in inspect(conn).get_table_names() if name != "alembic_version"]
-        seeds = tuple(
-            (table, rows)
+        insp = inspect(conn)
+        tables = [name for name in insp.get_table_names() if name != "alembic_version"]
+        seeded: dict[str, tuple[dict[str, Any], ...]] = {
+            table: tuple(dict(row) for row in conn.execute(text(f'SELECT * FROM "{table}"')).mappings())
             for table in tables
-            if (rows := tuple(dict(row) for row in conn.execute(text(f'SELECT * FROM "{table}"')).mappings()))
-        )
-    return _ResetPlan(truncate=", ".join(f'"{table}"' for table in tables), seeds=seeds)
+        }
+        seeded = {table: rows for table, rows in seeded.items() if rows}
+        parents = {
+            table: ({fk["referred_table"] for fk in insp.get_foreign_keys(table)} | set()) - {table}
+            for table in seeded
+        }
+        ordered: list[tuple[str, tuple[dict[str, Any], ...]]] = []
+        placed: set[str] = set()
+
+        def place(name: str) -> None:
+            if name in placed:
+                return
+            placed.add(name)
+            for parent in sorted(parents.get(name, ())):
+                if parent in seeded:
+                    place(parent)
+            ordered.append((name, seeded[name]))
+
+        for table in seeded:
+            place(table)
+    return _ResetPlan(truncate=", ".join(f'"{table}"' for table in tables), seeds=tuple(ordered))
 
 
 def _run_alembic_migrations(database_url: str) -> None:

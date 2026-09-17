@@ -130,6 +130,7 @@ from gateway.models.usage import UsageLog
 from gateway.ports.model_provider_port import HostedAccessDeniedError, ModelProviderPort
 from gateway.rate_limit import RateLimitInfo, check_rate_limit
 from gateway.repositories.sovereignty_repository import list_sovereignty_rows
+from gateway.repositories.tenancy.organization_repository import OrganizationRepository
 from gateway.services.budget_service import (
     ZERO,
     ReservationHandle,
@@ -180,6 +181,7 @@ from gateway.services.secret_box import SecretBoxUnavailableError, SecretDecrypt
 from gateway.services.sovereignty_access import (
     SovereigntyMap,
     build_sovereignty_map,
+    combine_residency_bars,
     is_sovereign_enough,
     parse_residency_bar,
     residency_refusal_detail,
@@ -846,6 +848,7 @@ class RequestContext:
         request_group_id: str | None = None,
         organization_id: uuid.UUID | None = None,
         residency: str | None = None,
+        residency_source: str = "none",
         sovereignty_map: "SovereigntyMap | None" = None,
     ) -> None:
         self.config = config
@@ -911,8 +914,11 @@ class RequestContext:
         self.request_group_id = request_group_id
         # Standalone-only: the residency bar this request carries and the
         # resolved provider->sovereignty map, kept so settlement records
-        # proof-of-routing (the level that actually served) on the usage row.
+        # proof-of-routing (the level that actually served) on the usage
+        # row. ``residency_source`` says which policy bound: the caller's
+        # request bar, the organization's floor, both, or neither.
         self.residency = residency
+        self.residency_source = residency_source
         self.sovereignty_map = sovereignty_map
 
 
@@ -1804,23 +1810,31 @@ async def resolve_request_context(
             # over to a forbidden model would be an access-control bypass. The gate
             # itself stays where it was, so a plain model name is unaffected.
             key_allowlist = await resolve_request_allowlist(db, api_key)
-        # Residency bar (NorthRouter). Validate the wire value first: an
-        # unknown bar is the caller's error and must not fall through as
-        # "unconstrained". Then resolve the provider->sovereignty map once:
-        # the config baseline plus the DB attestation rows visible to this
-        # request's organization, with the DB rows winning. The map is
-        # pure from here on, so the compiler, the gates below, and the
-        # catalog filter all answer from the same snapshot.
+        # Residency bar (NorthRouter plans 01/01b). Validate the wire value
+        # first: an unknown bar is the caller's error and must not fall
+        # through as "unconstrained". The organization's residency floor is
+        # then folded in with max(): the floor is resolved from the
+        # organization the billed key belongs to, so no key configuration
+        # escapes it (`allowed_models: null` means "no per-key restriction",
+        # not "exempt from org policy"). Then resolve the provider->
+        # sovereignty map once: the config baseline plus the DB attestation
+        # rows visible to this request's organization, with the DB rows
+        # winning. The map is pure from here on, so the compiler, the gates
+        # below, and the catalog filter all answer from the same snapshot.
         required_sovereignty = 1
+        residency_source = "none"
         sovereignty_map = SovereigntyMap()
-        if residency is not None:
-            try:
-                required_sovereignty = parse_residency_bar(residency)
-            except ValueError as exc:
-                raise adapter.error(400, str(exc), ErrorKind.INVALID_REQUEST) from exc
-            residency_org_id = organization_id
-            if residency_org_id is None and workspace_id is not None:
-                residency_org_id = await organization_for_workspace_id(db, workspace_id)
+        try:
+            if residency is not None:
+                parse_residency_bar(residency)
+        except ValueError as exc:
+            raise adapter.error(400, str(exc), ErrorKind.INVALID_REQUEST) from exc
+        residency_org_id = organization_id
+        if residency_org_id is None and workspace_id is not None:
+            residency_org_id = await organization_for_workspace_id(db, workspace_id)
+        org_floor = await OrganizationRepository(db).get_residency_floor(residency_org_id)
+        required_sovereignty, residency_source = combine_residency_bars(residency, org_floor)
+        if required_sovereignty > 1:
             rows = await list_sovereignty_rows(db, organization_id=residency_org_id)
             sovereignty_map = build_sovereignty_map(config, rows)
         rate_limit_info = check_rate_limit(raw_request, user_id)
@@ -1937,7 +1951,7 @@ async def resolve_request_context(
         if required_sovereignty > 1:
             head_ok, _ = is_sovereign_enough(sovereignty_map, gate_instance, gate_model, required_sovereignty)
             if not head_ok:
-                residency_detail = residency_refusal_detail(residency or "", required_sovereignty)
+                residency_detail = residency_refusal_detail(residency, required_sovereignty, residency_source)
                 await log_gateway_rejection(
                     db=db,
                     log_writer=log_writer,
@@ -2182,6 +2196,7 @@ async def resolve_request_context(
         request_group_id=str(uuid.uuid4()) if plan is not None else None,
         organization_id=organization_id,
         residency=residency,
+        residency_source=residency_source,
         sovereignty_map=sovereignty_map,
     )
 
@@ -3764,6 +3779,7 @@ def build_streaming_response(
     tool_tally: ToolUsageTally | None = None,
     workspace_id: uuid.UUID | None = None,
     residency: str | None = None,
+    residency_source: str = "none",
     sovereignty_map: "SovereigntyMap | None" = None,
 ) -> StreamingResponse:
     """Wrap an already-opened upstream stream in an SSE response.
@@ -3794,11 +3810,12 @@ def build_streaming_response(
         first_chunk_at = time.monotonic()
 
     def _audit() -> dict | None:
-        if residency is None:
+        if residency is None and residency_source == "none":
             return None
         smap = sovereignty_map or SovereigntyMap()
         return {
             "requested_residency": residency,
+            "residency_source": residency_source,
             "served_sovereignty_level": smap.level_for(provider, model),
         }
 
@@ -4227,6 +4244,7 @@ async def run_single_attempt_stream(
         attribution=stream_attribution,
         tool_tally=tool_ctx.tally,
         residency=ctx.residency,
+        residency_source=ctx.residency_source,
         sovereignty_map=ctx.sovereignty_map,
     )
 
@@ -4666,11 +4684,12 @@ def _residency_audit(ctx: RequestContext, instance: str | None, model: str | Non
     anything. ``None`` when the request carried no bar: an ungated row
     stays null rather than claiming a level nobody checked.
     """
-    if ctx.residency is None:
+    if ctx.residency is None and ctx.residency_source == "none":
         return None
     smap = ctx.sovereignty_map or SovereigntyMap()
     return {
         "requested_residency": ctx.residency,
+        "residency_source": ctx.residency_source,
         "served_sovereignty_level": smap.level_for(instance, model),
     }
 

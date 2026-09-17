@@ -199,8 +199,46 @@ def is_sovereign_enough(
     return False, f"sovereignty level {level} is below the required {required_level}"
 
 
-def residency_refusal_detail(residency: str, required_level: int) -> str:
-    """The 403 detail naming the bar and what it means."""
+def combine_residency_bars(request_bar: str | None, org_floor: str | None) -> tuple[int, str]:
+    """Fold the caller's bar and the organization's floor into one requirement.
+
+    ``required = max(request_bar_level, org_floor_level)``: a request bar can
+    only raise the requirement, never lower the organization's. An absent
+    value on either side is level 1 (no constraint). Returns
+    ``(required_level, source)`` where source is ``"request"``,
+    ``"organization"``, ``"both"`` (the two tie at the binding level), or
+    ``"none"`` when nothing is in force. Pure, so the floor is an input to
+    the compile rather than a database read: CLI ``explain`` keeps working.
+    """
+    request_level = parse_residency_bar(request_bar) if request_bar else 1
+    floor_level = parse_residency_bar(org_floor) if org_floor else 1
+    if floor_level <= 1:
+        return request_level, ("request" if request_level > 1 else "none")
+    if request_level < floor_level:
+        return floor_level, "organization"
+    if request_level > floor_level:
+        return request_level, "request"
+    return floor_level, "both"
+
+
+def residency_refusal_detail(residency: str | None, required_level: int, source: str = "request") -> str:
+    """The 403 detail naming the bar, its source, and what it means.
+
+    A refusal caused by the organization's floor names the floor explicitly
+    rather than resembling a failed caller-supplied bar: debugging a policy
+    you did not write is much easier when the refusal says who set it.
+    """
+    if source == "organization":
+        return (
+            f"This organization's residency policy requires a provider at sovereignty level "
+            f"{required_level} or higher, and no available provider clears that bar."
+        )
+    if source == "both":
+        return (
+            f"Residency policy '{residency}' and this organization's residency floor both require "
+            f"a provider at sovereignty level {required_level} or higher, "
+            "and no available provider clears that bar."
+        )
     return (
         f"Residency policy '{residency}' requires a provider at sovereignty level "
         f"{required_level} or higher, and no available provider clears that bar."
@@ -213,6 +251,7 @@ __all__ = [
     "SovereigntyMap",
     "SovereigntyRecord",
     "build_sovereignty_map",
+    "combine_residency_bars",
     "config_sovereignty",
     "is_sovereign_enough",
     "parse_residency_bar",

@@ -3207,6 +3207,41 @@
           }
         },
         {
+          "name": "Set Active Organization Residency Floor",
+          "request": {
+            "body": {
+              "mode": "raw",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              },
+              "raw": "{\n  \"residency_floor\": \"string\"\n}"
+            },
+            "description": "Set or clear the caller's organization's residency floor.\n\nOrganization owners and admins only. The floor binds every request made\nwith the organization's keys: the effective bar is\n``max(request_bar, org_floor)``, so a member can raise the requirement\nfrom a request but never lower the floor, and a key with no\n``allowed_models`` restriction is not exempt. Pass ``residency_floor:\nnull`` to clear it.",
+            "header": [
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "method": "PUT",
+            "url": {
+              "host": [
+                "{{baseUrl}}"
+              ],
+              "path": [
+                "api",
+                "v1",
+                "organizations",
+                "me",
+                "residency-floor"
+              ],
+              "raw": "{{baseUrl}}/api/v1/organizations/me/residency-floor"
+            }
+          }
+        },
+        {
           "name": "Switch Active Organization",
           "request": {
             "body": {

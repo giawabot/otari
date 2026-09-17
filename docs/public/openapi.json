@@ -9279,6 +9279,17 @@
             "title": "Name",
             "type": "string"
           },
+          "residency_floor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Residency Floor"
+          },
           "slug": {
             "maxLength": 255,
             "title": "Slug",
@@ -11422,6 +11433,25 @@
           "new_password"
         ],
         "title": "ResetPasswordRequest",
+        "type": "object"
+      },
+      "ResidencyFloorUpdateRequest": {
+        "description": "Set or clear the organization's residency floor (NorthRouter plan 01b).\n\n``residency_floor`` is a bar name (\"canadian\", \"sovereign\",\n\"sovereign_model\") or null for no floor. An unknown name is refused\nrather than silently treated as no floor: a typo in a compliance\ncontrol must fail loudly.",
+        "properties": {
+          "residency_floor": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Residency Floor"
+          }
+        },
+        "title": "ResidencyFloorUpdateRequest",
         "type": "object"
       },
       "ResourceLink": {
@@ -24312,6 +24342,56 @@
         "summary": "Restore Org Provider Key",
         "tags": [
           "provider-keys"
+        ]
+      }
+    },
+    "/api/v1/organizations/me/residency-floor": {
+      "put": {
+        "description": "Set or clear the caller's organization's residency floor.\n\nOrganization owners and admins only. The floor binds every request made\nwith the organization's keys: the effective bar is\n``max(request_bar, org_floor)``, so a member can raise the requirement\nfrom a request but never lower the floor, and a key with no\n``allowed_models`` restriction is not exempt. Pass ``residency_floor:\nnull`` to clear it.",
+        "operationId": "organizations-set_active_organization_residency_floor",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResidencyFloorUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationPublic"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "XApiKeyAuth": []
+          }
+        ],
+        "summary": "Set Active Organization Residency Floor",
+        "tags": [
+          "organizations"
         ]
       }
     },

@@ -15,9 +15,11 @@ from gateway.services.sovereignty_access import (
     SovereigntyMap,
     SovereigntyRecord,
     build_sovereignty_map,
+    combine_residency_bars,
     config_sovereignty,
     is_sovereign_enough,
     parse_residency_bar,
+    residency_refusal_detail,
 )
 
 
@@ -141,6 +143,52 @@ class TestPrecedence:
         smap = config_sovereignty(config)
         assert smap.level_for("box", "premium") == 4
         assert smap.level_for("box", "basic") == 2
+
+
+class TestCombineResidencyBars:
+    """The plan-01b max() table: floor x request bar x absent."""
+
+    def test_absent_both_is_unconstrained(self) -> None:
+        assert combine_residency_bars(None, None) == (1, "none")
+
+    def test_request_bar_alone(self) -> None:
+        assert combine_residency_bars("canadian", None) == (2, "request")
+        assert combine_residency_bars("sovereign_model", None) == (4, "request")
+
+    def test_floor_alone_binds(self) -> None:
+        assert combine_residency_bars(None, "sovereign") == (3, "organization")
+
+    def test_lower_request_bar_cannot_relax_the_floor(self) -> None:
+        # Request 'canadian' under a 'sovereign' floor: level 3 anyway.
+        assert combine_residency_bars("canadian", "sovereign") == (3, "organization")
+
+    def test_higher_request_bar_raises_above_the_floor(self) -> None:
+        assert combine_residency_bars("sovereign_model", "canadian") == (4, "request")
+
+    def test_tie_reports_both_sources(self) -> None:
+        assert combine_residency_bars("sovereign", "sovereign") == (3, "both")
+
+    def test_unknown_bar_raises(self) -> None:
+        with pytest.raises(ValueError, match="unknown residency policy"):
+            combine_residency_bars("european", None)
+        with pytest.raises(ValueError, match="unknown residency policy"):
+            combine_residency_bars(None, "european")
+
+
+class TestResidencyRefusalCopy:
+    def test_request_source_names_the_bar(self) -> None:
+        detail = residency_refusal_detail("sovereign", 3, "request")
+        assert "Residency policy 'sovereign'" in detail
+
+    def test_organization_source_names_the_floor(self) -> None:
+        detail = residency_refusal_detail(None, 3, "organization")
+        assert "This organization's residency policy" in detail
+        assert "None" not in detail
+
+    def test_both_source_names_both(self) -> None:
+        detail = residency_refusal_detail("sovereign", 3, "both")
+        assert "organization's residency floor" in detail
+        assert "'sovereign'" in detail
 
 
 class TestCompilerResidency:

@@ -1,5 +1,6 @@
 """OpenAI-compatible models listing endpoint with auto-discovery."""
 
+import uuid
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -20,6 +21,7 @@ from gateway.models.api_keys import APIKey
 from gateway.models.pricing import ModelPricing
 from gateway.models.tenancy import User as TenancyUser
 from gateway.repositories.sovereignty_repository import list_sovereignty_rows
+from gateway.repositories.tenancy.organization_repository import OrganizationRepository
 from gateway.services.merged_catalog_service import (
     ModelObject,
     alias_model,
@@ -50,7 +52,7 @@ from gateway.services.model_discovery_service import (
     get_model_cache,
 )
 from gateway.services.provider_kwargs import normalize_pricing_key
-from gateway.services.sovereignty_access import build_sovereignty_map, is_sovereign_enough, parse_residency_bar
+from gateway.services.sovereignty_access import build_sovereignty_map, combine_residency_bars, is_sovereign_enough
 from gateway.services.workspace_scope import organization_for_workspace_id
 
 if TYPE_CHECKING:
@@ -210,17 +212,23 @@ async def list_models(
     # admit at request time. Same map, same matcher the pipeline uses, so
     # what the catalog shows and what dispatch serves cannot disagree. A
     # dynamic policy stays listed when *any* of its candidates clears the
-    # bar, mirroring the compiler's per-candidate drop.
-    if residency is not None:
-        try:
-            required_level = parse_residency_bar(residency)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-        caller_workspace = auth[0].workspace_id if auth[0] is not None else None
-        residency_org_id = (
-            await organization_for_workspace_id(db, caller_workspace) if caller_workspace else None
-        )
-        rows = await list_sovereignty_rows(db, organization_id=residency_org_id)
+    # bar, mirroring the compiler's per-candidate drop. The caller's
+    # organization floor composes with an explicit ``residency=`` param
+    # under the same max() rule and applies even when the param is absent:
+    # the catalog never advertises a model the caller's own org policy
+    # would refuse at inference.
+    caller_org_id: uuid.UUID | None = None
+    if auth[0] is not None:
+        caller_org_id = await organization_for_workspace_id(db, auth[0].workspace_id)
+    elif session_identity is not None:
+        caller_org_id = session_identity.active_organization_id
+    org_floor = await OrganizationRepository(db).get_residency_floor(caller_org_id)
+    try:
+        required_level, _ = combine_residency_bars(residency, org_floor)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if required_level > 1:
+        rows = await list_sovereignty_rows(db, organization_id=caller_org_id)
         sovereignty_map = build_sovereignty_map(config, rows)
         aliases = catalog.aliases
         dynamic_reachable = {

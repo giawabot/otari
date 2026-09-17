@@ -342,6 +342,7 @@ class OrganizationUpdate(SQLModel):
 class OrganizationPublic(OrganizationBase):
     id: uuid.UUID
     created_by_user_id: uuid.UUID | None = None
+    residency_floor: str | None = None
     created_at: datetime
     updated_at: datetime | None = None
 
@@ -354,6 +355,15 @@ class OrganizationsPublic(SQLModel):
 class Organization(OrganizationBase, PrimaryKeyMixin, CreatedAtMixin, UpdatedAtMixin, table=True):
     __tablename__ = "organization"
     __table_args__ = (UniqueConstraint("slug", name="uq_organization_slug"),)
+
+    # The organization's residency floor (NorthRouter plan 01b): a bar name
+    # ("canadian", "sovereign", "sovereign_model") that every request from
+    # this organization must clear, or None for no floor. Resolved from the
+    # billed key's organization, so no key configuration escapes it:
+    # ``allowed_models: null`` means "no per-key restriction", not "exempt
+    # from org policy". A request bar composes with max(), so a caller can
+    # only raise the requirement, never lower this one.
+    residency_floor: str | None = Field(default=None, max_length=32)
 
     # Declared as an explicit column because this foreign key closes a cycle
     # (``user.active_organization_id`` points back here) and SQLModel's ``Field``
@@ -503,6 +513,18 @@ class OrganizationMembershipContextPublic(SQLModel):
 
 class ActiveOrganizationUpdateRequest(SQLModel):
     name: str = Field(min_length=1, max_length=255)
+
+
+class ResidencyFloorUpdateRequest(SQLModel):
+    """Set or clear the organization's residency floor (NorthRouter plan 01b).
+
+    ``residency_floor`` is a bar name ("canadian", "sovereign",
+    "sovereign_model") or null for no floor. An unknown name is refused
+    rather than silently treated as no floor: a typo in a compliance
+    control must fail loudly.
+    """
+
+    residency_floor: str | None = Field(default=None, max_length=32)
 
 
 class OrganizationCreateRequest(SQLModel):
