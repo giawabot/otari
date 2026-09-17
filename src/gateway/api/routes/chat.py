@@ -17,6 +17,7 @@ from gateway.api.deps import (
     BillingPortDep,
     ModelProviderPortDep,
     OptionalFileServiceDep,
+    OrganizationServiceDep,
     ToolPorts,
     ToolPortsDep,
     build_sandbox_container_registry,
@@ -84,6 +85,7 @@ from gateway.services.mcp_loop import (
 from gateway.services.pricing import PriceFacts
 from gateway.services.provider_kwargs import apply_endpoint_defaults, with_request_fields
 from gateway.services.providers import acompletion
+from gateway.services.tenancy import OrganizationService
 from gateway.services.tools import (
     CODE_EXECUTION_HEADER,
     WEB_FETCH_HEADER,
@@ -503,6 +505,7 @@ async def chat_completions(
     config: Annotated[GatewayConfig, Depends(get_config)],
     log_writer: Annotated[LogWriter, Depends(get_log_writer)],
     model_provider: ModelProviderPortDep,
+    organization_service: OrganizationServiceDep,
     billing: BillingPortDep,
     tool_ports: ToolPortsDep,
     idempotency: IdempotencyGuardDep,
@@ -528,6 +531,7 @@ async def chat_completions(
         config=config,
         log_writer=log_writer,
         model_provider=model_provider,
+        organization_service=organization_service,
         billing=billing,
         tool_ports=tool_ports,
         idempotency=idempotency,
@@ -546,6 +550,7 @@ async def run_chat_completion(
     config: GatewayConfig,
     log_writer: LogWriter,
     model_provider: ModelProviderPort,
+    organization_service: OrganizationService,
     billing: BillingPort,
     tool_ports: ToolPorts,
     session_principal: SessionPrincipal | None = None,
@@ -647,6 +652,7 @@ async def run_chat_completion(
             tools=request.tools,
             code_execution_policies=tool_ports.code_execution_policy,
             model_provider=model_provider,
+            organization_service=organization_service,
             idempotency=None if request.stream else idempotency,
             tags=resolved_tags(tags_header, request.metadata),
             turn=read_turn("chat", request.messages),

@@ -7,8 +7,10 @@ loads rows.
 """
 
 import uuid
+from typing import Any
 
 from sqlalchemy import select
+from sqlmodel import col
 
 from gateway.core.unit_of_work import UnitOfWork, session_for
 from gateway.models.sovereignty import ProviderSovereignty
@@ -28,12 +30,13 @@ async def list_sovereignty_rows(
     this query's.
     """
     stmt = select(ProviderSovereignty).order_by(
-        ProviderSovereignty.provider,
-        ProviderSovereignty.model.asc().nullsfirst(),
+        col(ProviderSovereignty.provider),
+        col(ProviderSovereignty.model).asc().nullsfirst(),
     )
     if organization_id is not None:
         stmt = stmt.where(
-            (ProviderSovereignty.organization_id.is_(None)) | (ProviderSovereignty.organization_id == organization_id)
+            (col(ProviderSovereignty.organization_id).is_(None))
+            | (col(ProviderSovereignty.organization_id) == organization_id)
         )
     result = await session_for(uow).execute(stmt)
     return list(result.scalars().all())
@@ -50,7 +53,7 @@ async def upsert_sovereignty(
     operator_jurisdiction: str,
     model_origin: str | None = None,
     vetted: bool = False,
-    evidence: dict | None = None,
+    evidence: dict[str, Any] | None = None,
 ) -> ProviderSovereignty:
     """Insert or update the one row for (organization, provider, model).
 
@@ -60,11 +63,11 @@ async def upsert_sovereignty(
     """
     db = session_for(uow)
     stmt = select(ProviderSovereignty).where(
-        ProviderSovereignty.provider == provider,
-        ProviderSovereignty.model == model,
-        ProviderSovereignty.organization_id == organization_id
+        col(ProviderSovereignty.provider) == provider,
+        col(ProviderSovereignty.model) == model,
+        col(ProviderSovereignty.organization_id) == organization_id
         if organization_id is not None
-        else ProviderSovereignty.organization_id.is_(None),
+        else col(ProviderSovereignty.organization_id).is_(None),
     )
     existing = (await db.execute(stmt)).scalar_one_or_none()
     if existing is not None:

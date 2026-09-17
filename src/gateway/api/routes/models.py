@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gateway.api.deps import (
     HostedProviderServiceDep,
+    OrganizationServiceDep,
     OrgProviderKeyServiceDep,
     RequestSessionModelProviderPortDep,
     UnitOfWorkDep,
@@ -61,7 +62,7 @@ from gateway.services.pricing_service import latest_price_version
 from gateway.services.provider_kwargs import normalize_pricing_key
 from gateway.services.selector_index_service import answered_by_listing, models_by_identity
 from gateway.services.sovereignty import SovereigntyService
-from gateway.services.tenancy import OrgProviderKeyService
+from gateway.services.tenancy import OrganizationService, OrgProviderKeyService
 
 if TYPE_CHECKING:
     pass
@@ -202,6 +203,7 @@ async def list_models(
     session_identity: Annotated[TenancyUser | None, Depends(get_session_identity)],
     model_provider: RequestSessionModelProviderPortDep,
     org_provider_keys: OrgProviderKeyServiceDep,
+    organization_service: OrganizationServiceDep,
     provider: Annotated[
         str | None, Query(description="Only the models this provider instance serves, described as served there.")
     ] = None,
@@ -239,6 +241,7 @@ async def list_models(
             session_identity,
             model_provider,
             org_provider_keys,
+            organization_service,
             provider=provider,
             residency=residency,
             workspace_id=workspace_id,
@@ -254,6 +257,7 @@ async def _listing(
     session_identity: TenancyUser | None,
     model_provider: ModelProviderPort,
     org_provider_keys: OrgProviderKeyService,
+    organization_service: OrganizationService,
     *,
     provider: str | None = None,
     residency: str | None = None,
@@ -273,11 +277,12 @@ async def _listing(
     )
     models = list(catalog.models.values())
     organization_id = await viewer_organization(db, auth, session_identity)
-    if residency is not None:
-        try:
-            required_level = SovereigntyService.parse_bar(residency)
-        except ValueError as exc:
-            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    org_floor = await organization_service.get_residency_floor(organization_id)
+    try:
+        required_level, _ = SovereigntyService.combine_bars(residency, org_floor)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if required_level > 1:
         rows = await SovereigntyService.attestations(uow, organization_id=organization_id)
         sovereignty_map = SovereigntyService.map_for(config, rows)
         dynamic_reachable = {
@@ -402,6 +407,7 @@ async def get_model(
     session_identity: Annotated[TenancyUser | None, Depends(get_session_identity)],
     model_provider: RequestSessionModelProviderPortDep,
     org_provider_keys: OrgProviderKeyServiceDep,
+    organization_service: OrganizationServiceDep,
 ) -> ModelObject:
     """Get details for a specific model, by catalog id, alias or `instance:model` selector.
 
@@ -409,7 +415,9 @@ async def get_model(
     """
     scope, aliases = await _caller_scope(db, config, auth, session_identity, model_provider)
     if answered_by_listing(model_id, aliases):
-        listed = await _listing(db, uow, config, auth, session_identity, model_provider, org_provider_keys)
+        listed = await _listing(
+            db, uow, config, auth, session_identity, model_provider, org_provider_keys, organization_service
+        )
         found = next((obj for obj in listed if obj.id == model_id), None)
         if found is not None:
             return found

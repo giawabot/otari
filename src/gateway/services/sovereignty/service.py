@@ -14,6 +14,7 @@ from gateway.repositories.sovereignty import list_sovereignty_rows
 from gateway.services.sovereignty.access import (
     SovereigntyMap,
     build_sovereignty_map,
+    combine_residency_bars,
     is_sovereign_enough,
     parse_residency_bar,
     residency_refusal_detail,
@@ -36,14 +37,21 @@ class SovereigntyService:
         return build_sovereignty_map(config, rows)
 
     @staticmethod
-    def is_enough(sovereignty: SovereigntyMap, required_level: int, provider: str, model: str | None) -> bool:
+    def is_enough(
+        sovereignty: SovereigntyMap, provider: str | None, model: str | None, required_level: int
+    ) -> tuple[bool, str]:
         """Whether one candidate clears the required level under the map's precedence."""
-        return is_sovereign_enough(sovereignty, required_level, provider, model)
+        return is_sovereign_enough(sovereignty, provider, model, required_level)
 
     @staticmethod
-    def refusal_detail(residency: str, required_level: int) -> str:
+    def combine_bars(request_bar: str | None, organization_floor: str | None) -> tuple[int, str]:
+        """Fold a request bar and organization floor into their effective level and source."""
+        return combine_residency_bars(request_bar, organization_floor)
+
+    @staticmethod
+    def refusal_detail(residency: str | None, required_level: int, source: str = "request") -> str:
         """The 403 detail naming the bar and what it means."""
-        return residency_refusal_detail(residency, required_level)
+        return residency_refusal_detail(residency, required_level, source)
 
     @staticmethod
     async def attestations(

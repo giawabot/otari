@@ -370,6 +370,7 @@ from gateway.services.sandbox_backend import (
 )
 from gateway.services.secret_box import SecretBoxUnavailableError, SecretDecryptionError
 from gateway.services.sovereignty import SovereigntyMap, SovereigntyService
+from gateway.services.tenancy import OrganizationService
 from gateway.services.tenancy.organization_guardrail_runner import handle as guardrail_handle
 from gateway.services.tenancy.organization_guardrail_service import (
     ResolvedOrganizationGuardrail,
@@ -750,6 +751,7 @@ class RequestContext:
         api_key: APIKey | None = None,
         session: bool = False,
         residency: str | None = None,
+        residency_source: str = "none",
         sovereignty_map: SovereigntyMap | None = None,
     ) -> None:
         self.config = config
@@ -868,6 +870,7 @@ class RequestContext:
         # rows take `request_id` directly because no attribution carries it.
         self.request_group_id = request_group_id
         self.residency = residency
+        self.residency_source = residency_source
         self.sovereignty_map = sovereignty_map
         # The budget of the end user a service key named, which a streamed
         # response has to carry itself (see ``build_streaming_response``).
@@ -2330,6 +2333,7 @@ async def resolve_request_context(
     safety_identifier: str | None = None,
     price_facts: PriceFacts = NO_FACTS,
     residency: str | None = None,
+    organization_service: OrganizationService,
 ) -> RequestContext:
     """Run the shared handler preamble up to (and including) budget pre-debit.
 
@@ -2486,12 +2490,14 @@ async def resolve_request_context(
     # Everything below keys on the plan's head candidate, as it would on a plain model.
     organization_id = await organization_for_workspace_id(db, workspace_id)
     required_sovereignty = 1
+    residency_source = "none"
     sovereignty_map = SovereigntyMap()
-    if residency is not None:
-        try:
-            required_sovereignty = SovereigntyService.parse_bar(residency)
-        except ValueError as exc:
-            raise adapter.error(400, str(exc), ErrorKind.INVALID_REQUEST) from exc
+    try:
+        org_floor = await organization_service.get_residency_floor(organization_id)
+        required_sovereignty, residency_source = SovereigntyService.combine_bars(residency, org_floor)
+    except ValueError as exc:
+        raise adapter.error(400, str(exc), ErrorKind.INVALID_REQUEST) from exc
+    if required_sovereignty > 1:
         rows = await SovereigntyService.attestations(uow, organization_id=organization_id)
         sovereignty_map = SovereigntyService.map_for(config, rows)
     prices = get_request_prices(db, organization_id)
@@ -2639,7 +2645,7 @@ async def resolve_request_context(
     if required_sovereignty > 1:
         allowed, _ = SovereigntyService.is_enough(sovereignty_map, gate_instance, gate_model, required_sovereignty)
         if not allowed:
-            detail = SovereigntyService.refusal_detail(residency or "", required_sovereignty)
+            detail = SovereigntyService.refusal_detail(residency, required_sovereignty, residency_source)
             await log_gateway_rejection(
                 db=db,
                 log_writer=log_writer,
@@ -3164,6 +3170,7 @@ async def resolve_request_context(
         api_key=api_key,
         session=session_principal is not None,
         residency=residency,
+        residency_source=residency_source,
         sovereignty_map=sovereignty_map,
     )
 
@@ -5251,7 +5258,7 @@ async def _log_failure_and_refund(
         source_label=ctx.source_label,
         safety_identifier=ctx.upstream_user,
         deployment_paid=ctx.deployment_charge is not None,
-        residency_audit=_residency_audit(ctx.residency, ctx.sovereignty_map, provider, model),
+        residency_audit=_residency_audit(ctx.residency, ctx.residency_source, ctx.sovereignty_map, provider, model),
     )
     if ctx.reservation is not None:
         if cost := logged.cost:
@@ -5698,6 +5705,7 @@ def build_streaming_response(
     prompt_chars: int | None = None,
     price_facts: PriceFacts = NO_FACTS,
     residency: str | None = None,
+    residency_source: str = "none",
     sovereignty_map: SovereigntyMap | None = None,
 ) -> StreamingResponse:
     """Wrap an already-opened upstream stream in an SSE response.
@@ -5738,7 +5746,7 @@ def build_streaming_response(
     deployment_paid = deployment_charge is not None
 
     def _audit() -> dict[str, Any] | None:
-        return _residency_audit(residency, sovereignty_map, provider, model)
+        return _residency_audit(residency, residency_source, sovereignty_map, provider, model)
 
     async def _charge(logged: LoggedUsage, *, expects_cost: bool) -> None:
         await charge_deployment_paid(
@@ -6542,6 +6550,7 @@ async def run_single_attempt_stream(
         if served_tools.use_tool_loop or ctx.estimate_inputs is None
         else ctx.estimate_inputs.prompt_chars,
         residency=ctx.residency,
+        residency_source=ctx.residency_source,
         sovereignty_map=ctx.sovereignty_map,
     )
 
@@ -6578,16 +6587,18 @@ def _attribution_for(ctx: RequestContext, attempt: Attempt, *, absorbed: bool = 
 
 def _residency_audit(
     residency: str | None,
+    residency_source: str,
     sovereignty_map: SovereigntyMap | None,
     instance: str | None,
     model: str | None,
 ) -> dict[str, Any] | None:
     """Proof-of-routing for a residency-gated request."""
-    if residency is None:
+    if residency is None and residency_source == "none":
         return None
     smap = sovereignty_map or SovereigntyMap()
     return {
         "requested_residency": residency,
+        "residency_source": residency_source,
         "served_sovereignty_level": smap.level_for(instance, model),
     }
 
@@ -6660,7 +6671,9 @@ async def log_exhausted_plan(
         tags=ctx.tags,
         source_label=ctx.source_label,
         safety_identifier=ctx.upstream_user,
-        residency_audit=_residency_audit(ctx.residency, ctx.sovereignty_map, last.instance, last.model),
+        residency_audit=_residency_audit(
+            ctx.residency, ctx.residency_source, ctx.sovereignty_map, last.instance, last.model
+        ),
     )
     ctx.tool_charge = logged.cost or Decimal(0)
     if ctx.reservation is not None:
@@ -6963,7 +6976,9 @@ async def run_non_stream(
                 safety_identifier=ctx.upstream_user,
                 prices=ctx.prices,
                 deployment_paid=ctx.deployment_charge is not None,
-                residency_audit=_residency_audit(ctx.residency, ctx.sovereignty_map, provider, model),
+                residency_audit=_residency_audit(
+                    ctx.residency, ctx.residency_source, ctx.sovereignty_map, provider, model
+                ),
             )
         if ctx.reservation is not None:
             await charge_deployment_paid(
