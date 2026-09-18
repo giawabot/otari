@@ -75,6 +75,19 @@ SESSION_LABEL_DESC = (
     "effect in standalone mode, where there is no platform to report it to."
 )
 
+# Shared definition for the optional ``residency`` body field on the chat,
+# messages, and responses request schemas (NorthRouter). OpenAI SDK clients
+# pass it via ``extra_body={"residency": "sovereign"}``; the gateway treats
+# it as a routing constraint, never forwards it upstream.
+RESIDENCY_DESC = (
+    "Optional residency policy for this request. 'canadian' routes only to "
+    "providers hosted in Canada; 'sovereign' requires Canadian-owned and "
+    "operated hosting outside foreign legal reach. Requests with no bar are "
+    "unconstrained. A request whose candidate providers cannot clear the bar "
+    "is refused with 403 rather than served from a non-compliant provider. "
+    "The honored level is recorded on the usage row for audit."
+)
+
 
 def derive_request_base(
     params_model: type[BaseModel],

@@ -35,6 +35,7 @@ from gateway.services.routing.backends import (
 )
 from gateway.services.routing.compiler import RouterOrdering
 from gateway.services.routing.weighted import declared_shares, describe_split, explain_ordering
+from gateway.services.sovereignty_access import SovereigntyMap, is_sovereign_enough
 
 __all__ = [
     "ROUTER_DEADLINE_SECONDS",
@@ -89,6 +90,8 @@ async def decide_ordering(
     allowlist: list[str] | None,
     signal: RoutingSignal | None,
     workspace_id: uuid.UUID | None = None,
+    required_sovereignty: int = 1,
+    sovereignty: SovereigntyMap | None = None,
 ) -> RouterOrdering | None:
     """Ask the policy's router to rank its candidates for this request.
 
@@ -130,7 +133,13 @@ async def decide_ordering(
         return None
 
     pool = usable_candidates(
-        config, spec.router_candidates, user_id=user_id, allowlist=allowlist, workspace_id=workspace_id
+        config,
+        spec.router_candidates,
+        user_id=user_id,
+        allowlist=allowlist,
+        workspace_id=workspace_id,
+        required_sovereignty=required_sovereignty,
+        sovereignty=sovereignty,
     )
     default_model = spec.default_target
     if not pool:
@@ -281,6 +290,8 @@ def usable_candidates(
     user_id: str | None,
     allowlist: list[str] | None,
     workspace_id: uuid.UUID | None = None,
+    required_sovereignty: int = 1,
+    sovereignty: SovereigntyMap | None = None,
 ) -> list[str]:
     """The candidates this caller may actually be served, in declared order.
 
@@ -307,5 +318,9 @@ def usable_candidates(
             continue
         if not is_model_allowed(allowlist, f"{resolved.instance}:{resolved.model}"):
             continue
+        if required_sovereignty > 1 and sovereignty is not None:
+            allowed, _ = is_sovereign_enough(sovereignty, resolved.instance, resolved.model, required_sovereignty)
+            if not allowed:
+                continue
         usable.append(selector)
     return usable

@@ -129,6 +129,8 @@ from gateway.models.pricing import ModelPricing
 from gateway.models.usage import UsageLog
 from gateway.ports.model_provider_port import HostedAccessDeniedError, ModelProviderPort
 from gateway.rate_limit import RateLimitInfo, check_rate_limit
+from gateway.repositories.sovereignty_repository import list_sovereignty_rows
+from gateway.repositories.tenancy.organization_repository import OrganizationRepository
 from gateway.services.budget_service import (
     ZERO,
     ReservationHandle,
@@ -176,6 +178,14 @@ from gateway.services.sandbox_backend import (
 )
 from gateway.services.scoped_budget_service import BudgetScopeRequest
 from gateway.services.secret_box import SecretBoxUnavailableError, SecretDecryptionError
+from gateway.services.sovereignty_access import (
+    SovereigntyMap,
+    build_sovereignty_map,
+    combine_residency_bars,
+    is_sovereign_enough,
+    parse_residency_bar,
+    residency_refusal_detail,
+)
 from gateway.services.tenancy.errors import (
     WorkspaceMcpServerNotFoundError,
     WorkspaceWebSearchDomainsExcludedError,
@@ -837,6 +847,9 @@ class RequestContext:
         estimate_inputs: "EstimateInputs | None" = None,
         request_group_id: str | None = None,
         organization_id: uuid.UUID | None = None,
+        residency: str | None = None,
+        residency_source: str = "none",
+        sovereignty_map: "SovereigntyMap | None" = None,
     ) -> None:
         self.config = config
         self.db = db
@@ -899,6 +912,14 @@ class RequestContext:
         # without a shared id they would be unrelated rows in the activity log.
         # `None` for an unrouted request, which writes exactly one row.
         self.request_group_id = request_group_id
+        # Standalone-only: the residency bar this request carries and the
+        # resolved provider->sovereignty map, kept so settlement records
+        # proof-of-routing (the level that actually served) on the usage
+        # row. ``residency_source`` says which policy bound: the caller's
+        # request bar, the organization's floor, both, or neither.
+        self.residency = residency
+        self.residency_source = residency_source
+        self.sovereignty_map = sovereignty_map
 
 
 def scope_prompt_cache_key(request_fields: dict[str, Any], ctx: RequestContext) -> dict[str, Any]:
@@ -1475,6 +1496,9 @@ async def _compile_request_plan(
     started_at: float,
     routing_signal: Callable[[], RoutingSignal] | None = None,
     workspace_id: uuid.UUID | None = None,
+    organization_id: uuid.UUID | None = None,
+    required_sovereignty: int = 1,
+    sovereignty: SovereigntyMap | None = None,
 ) -> CompiledPlan | None:
     """Compile ``model`` into a plan when it names a routing policy, else ``None``.
 
@@ -1516,6 +1540,8 @@ async def _compile_request_plan(
             allowlist=allowlist,
             signal=routing_signal() if routing_signal is not None else None,
             workspace_id=workspace_id,
+            required_sovereignty=required_sovereignty,
+            sovereignty=sovereignty,
         )
 
     try:
@@ -1529,6 +1555,8 @@ async def _compile_request_plan(
             budget=budget,
             router_ordering=router_ordering,
             workspace_id=workspace_id,
+            required_sovereignty=required_sovereignty,
+            sovereignty=sovereignty,
         )
     except NoEligibleCandidatesError as exc:
         logger.warning("%s", exc.operator_detail)
@@ -1631,6 +1659,7 @@ async def resolve_request_context(
     estimate_cache_write_ttl: Literal["5m", "1h"] | None = None,
     session_principal: SessionPrincipal | None = None,
     routing_signal: Callable[[], RoutingSignal] | None = None,
+    residency: str | None = None,
     normalize_messages: Callable[
         [str, LLMProvider | None, str, str | None, uuid.UUID | None],
         Awaitable[tuple[int, CompletionUsage | None]],
@@ -1671,6 +1700,15 @@ async def resolve_request_context(
     ``(prompt_chars, vision_usage)``; any vision describe side-call it made is
     metered and billed here as committed spend (the call already happened, so it
     is not gated or refundable).
+
+    ``residency`` (standalone only) is the caller's residency bar, the wire
+    value from ``extra_body.residency`` ("canadian", "sovereign"). An unknown
+    value is a 400 before any other work: a typo in a compliance control must
+    fail loudly, not silently relax to unconstrained. When set, the
+    provider->sovereignty map is resolved once here (config baseline plus DB
+    attestation rows for the request's organization) and every routing gate
+    below consults it, so the bar binds the plan compile, the head-candidate
+    gates, and the usage-row audit alike.
     """
     # Earliest point in the shared handler preamble; anchors the request's
     # latency_ms (measured monotonically, so it is immune to wall-clock steps).
@@ -1772,6 +1810,33 @@ async def resolve_request_context(
             # over to a forbidden model would be an access-control bypass. The gate
             # itself stays where it was, so a plain model name is unaffected.
             key_allowlist = await resolve_request_allowlist(db, api_key)
+        # Residency bar (NorthRouter plans 01/01b). Validate the wire value
+        # first: an unknown bar is the caller's error and must not fall
+        # through as "unconstrained". The organization's residency floor is
+        # then folded in with max(): the floor is resolved from the
+        # organization the billed key belongs to, so no key configuration
+        # escapes it (`allowed_models: null` means "no per-key restriction",
+        # not "exempt from org policy"). Then resolve the provider->
+        # sovereignty map once: the config baseline plus the DB attestation
+        # rows visible to this request's organization, with the DB rows
+        # winning. The map is pure from here on, so the compiler, the gates
+        # below, and the catalog filter all answer from the same snapshot.
+        required_sovereignty = 1
+        residency_source = "none"
+        sovereignty_map = SovereigntyMap()
+        try:
+            if residency is not None:
+                parse_residency_bar(residency)
+        except ValueError as exc:
+            raise adapter.error(400, str(exc), ErrorKind.INVALID_REQUEST) from exc
+        residency_org_id = organization_id
+        if residency_org_id is None and workspace_id is not None:
+            residency_org_id = await organization_for_workspace_id(db, workspace_id)
+        org_floor = await OrganizationRepository(db).get_residency_floor(residency_org_id)
+        required_sovereignty, residency_source = combine_residency_bars(residency, org_floor)
+        if required_sovereignty > 1:
+            rows = await list_sovereignty_rows(db, organization_id=residency_org_id)
+            sovereignty_map = build_sovereignty_map(config, rows)
         rate_limit_info = check_rate_limit(raw_request, user_id)
 
         # Tolerate an unparseable / unknown-provider selector here: the budget
@@ -1798,6 +1863,8 @@ async def resolve_request_context(
             started_at=started_at,
             routing_signal=routing_signal,
             workspace_id=workspace_id,
+            required_sovereignty=required_sovereignty,
+            sovereignty=sovereignty_map,
         )
         if plan is not None:
             head = plan.head
@@ -1875,6 +1942,29 @@ async def resolve_request_context(
                     started_at=started_at,
                 )
                 raise adapter.error(403, not_allowed_detail, ErrorKind.PERMISSION)
+
+        # Residency gate on the resolved head (NorthRouter). A routing plan
+        # was already filtered candidate-by-candidate at compile time, so
+        # this catches the paths that never compile: a plain model selector
+        # or an alias. Fail closed: an unattested provider is level 1 and a
+        # bar above 1 refuses it.
+        if required_sovereignty > 1:
+            head_ok, _ = is_sovereign_enough(sovereignty_map, gate_instance, gate_model, required_sovereignty)
+            if not head_ok:
+                residency_detail = residency_refusal_detail(residency, required_sovereignty, residency_source)
+                await log_gateway_rejection(
+                    db=db,
+                    log_writer=log_writer,
+                    api_key_id=api_key_id,
+                    user_id=user_id,
+                    model=gate_model,
+                    provider=gate_instance,
+                    endpoint=adapter.endpoint,
+                    detail=residency_detail,
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    started_at=started_at,
+                )
+                raise adapter.error(403, residency_detail, ErrorKind.PERMISSION)
 
         # Derived from the workspace already resolved above, not via
         # `organization_for_key_id` (which would re-derive the same workspace
@@ -2105,6 +2195,9 @@ async def resolve_request_context(
         estimate_inputs=estimate_inputs,
         request_group_id=str(uuid.uuid4()) if plan is not None else None,
         organization_id=organization_id,
+        residency=residency,
+        residency_source=residency_source,
+        sovereignty_map=sovereignty_map,
     )
 
 
@@ -3031,6 +3124,7 @@ async def log_usage(
     attribution: RoutingAttribution | None = None,
     tool_tally: ToolUsageTally | None = None,
     workspace_id: uuid.UUID | None = None,
+    residency_audit: dict | None = None,
 ) -> Decimal | None:
     """Log API usage to the database and return the computed cost.
 
@@ -3107,6 +3201,7 @@ async def log_usage(
         attempt_position=attribution.position if attribution else None,
         attempt_count=attribution.attempt_count if attribution else None,
         request_group_id=attribution.request_group_id if attribution else None,
+        residency_audit=residency_audit,
     )
 
     usage_data = usage_override
@@ -3683,6 +3778,9 @@ def build_streaming_response(
     attribution: RoutingAttribution | None = None,
     tool_tally: ToolUsageTally | None = None,
     workspace_id: uuid.UUID | None = None,
+    residency: str | None = None,
+    residency_source: str = "none",
+    sovereignty_map: "SovereigntyMap | None" = None,
 ) -> StreamingResponse:
     """Wrap an already-opened upstream stream in an SSE response.
 
@@ -3710,6 +3808,16 @@ def build_streaming_response(
     def _on_first_chunk() -> None:
         nonlocal first_chunk_at
         first_chunk_at = time.monotonic()
+
+    def _audit() -> dict | None:
+        if residency is None and residency_source == "none":
+            return None
+        smap = sovereignty_map or SovereigntyMap()
+        return {
+            "requested_residency": residency,
+            "residency_source": residency_source,
+            "served_sovereignty_level": smap.level_for(provider, model),
+        }
 
     async def _on_complete(usage_data: CompletionUsage) -> SettledCost | None:
         if platform_active:
@@ -3743,6 +3851,7 @@ def build_streaming_response(
             attribution=attribution,
             tool_tally=tool_tally,
             workspace_id=workspace_id,
+            residency_audit=_audit(),
         )
         if reservation is not None:
             await reconcile_reservation(
@@ -3789,6 +3898,7 @@ def build_streaming_response(
                 attribution=attribution,
                 tool_tally=tool_tally,
                 workspace_id=workspace_id,
+                residency_audit=_audit(),
             )
             # "Free" is about the tokens the provider never reported, not about
             # tool calls the gateway definitely ran and owes for.
@@ -3817,6 +3927,7 @@ def build_streaming_response(
             attribution=attribution,
             tool_tally=tool_tally,
             workspace_id=workspace_id,
+            residency_audit=_audit(),
         )
         # The estimate covers the unreported tokens; log_usage adds any tool cost on
         # top of it, so reconcile against the row's total rather than the estimate.
@@ -3863,6 +3974,7 @@ def build_streaming_response(
             attribution=attribution,
             tool_tally=tool_tally,
             workspace_id=workspace_id,
+            residency_audit=_audit(),
         )
         if reservation is not None:
             # A stream that died after running searches still owes for them, and a
@@ -4131,6 +4243,9 @@ async def run_single_attempt_stream(
         display_model=display_model,
         attribution=stream_attribution,
         tool_tally=tool_ctx.tally,
+        residency=ctx.residency,
+        residency_source=ctx.residency_source,
+        sovereignty_map=ctx.sovereignty_map,
     )
 
 
@@ -4560,6 +4675,25 @@ async def run_platform_non_stream(
     return result
 
 
+def _residency_audit(ctx: RequestContext, instance: str | None, model: str | None) -> dict | None:
+    """Proof-of-routing for a residency-gated request.
+
+    Records the bar the caller asked for and the sovereignty level of the
+    provider that actually served, so the usage row answers "did this
+    request stay inside its residency policy" without re-resolving
+    anything. ``None`` when the request carried no bar: an ungated row
+    stays null rather than claiming a level nobody checked.
+    """
+    if ctx.residency is None and ctx.residency_source == "none":
+        return None
+    smap = ctx.sovereignty_map or SovereigntyMap()
+    return {
+        "requested_residency": ctx.residency,
+        "residency_source": ctx.residency_source,
+        "served_sovereignty_level": smap.level_for(instance, model),
+    }
+
+
 def _attribution_for(ctx: RequestContext, attempt: Attempt, *, absorbed: bool = False) -> RoutingAttribution | None:
     """Attribution for a row produced by ``attempt``, or None when unrouted."""
     if ctx.plan is None or ctx.request_group_id is None:
@@ -4630,6 +4764,7 @@ async def log_exhausted_plan(
         attribution=_failure_attribution(ctx, last),
         tool_tally=tool_tally,
         workspace_id=ctx.workspace_id,
+        residency_audit=_residency_audit(ctx, last.instance, last.model),
     )
     ctx.tool_charge = cost or Decimal(0)
 
@@ -4786,6 +4921,7 @@ async def run_standalone_non_stream(
                     attribution=attribution,
                     tool_tally=tool_ctx.tally,
                     workspace_id=ctx.workspace_id,
+                    residency_audit=_residency_audit(ctx, provider, model),
                 )
             if ctx.reservation is not None:
                 await reconcile_reservation(

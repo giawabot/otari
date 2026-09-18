@@ -1,5 +1,6 @@
 """OpenAI-compatible models listing endpoint with auto-discovery."""
 
+import uuid
 from typing import TYPE_CHECKING, Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -19,6 +20,8 @@ from gateway.core.surface import Surface
 from gateway.models.api_keys import APIKey
 from gateway.models.pricing import ModelPricing
 from gateway.models.tenancy import User as TenancyUser
+from gateway.repositories.sovereignty_repository import list_sovereignty_rows
+from gateway.repositories.tenancy.organization_repository import OrganizationRepository
 from gateway.services.merged_catalog_service import (
     ModelObject,
     alias_model,
@@ -49,6 +52,8 @@ from gateway.services.model_discovery_service import (
     get_model_cache,
 )
 from gateway.services.provider_kwargs import normalize_pricing_key
+from gateway.services.sovereignty_access import build_sovereignty_map, combine_residency_bars, is_sovereign_enough
+from gateway.services.workspace_scope import organization_for_workspace_id
 
 if TYPE_CHECKING:
     pass
@@ -182,6 +187,15 @@ async def list_models(
     auth: Annotated[tuple[APIKey | None, bool], Depends(verify_catalog_reader)],
     session_identity: Annotated[TenancyUser | None, Depends(get_session_identity)],
     provider: Annotated[str | None, Query(description="Filter models by provider name")] = None,
+    residency: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Filter the catalog to models that clear a residency bar: "
+                "'canadian' (level 2+), 'sovereign' (level 3+), 'sovereign_model' (level 4)."
+            )
+        ),
+    ] = None,
 ) -> ModelListResponse:
     """List all available models.
 
@@ -189,8 +203,57 @@ async def list_models(
     pricing data from the model_pricing table when available. Models that only
     exist in the pricing table are also included for backward compatibility.
     """
-    catalog = await build_merged_catalog(db, config, auth=auth, session_identity=session_identity, provider=provider)
-    return ModelListResponse(data=sorted(catalog.models.values(), key=lambda m: m.id))
+    catalog = await build_merged_catalog(
+        db, config, auth=auth, session_identity=session_identity, provider=provider
+    )
+    merged = catalog.models
+
+    # Residency catalog filter: keep only the models a residency bar would
+    # admit at request time. Same map, same matcher the pipeline uses, so
+    # what the catalog shows and what dispatch serves cannot disagree. A
+    # dynamic policy stays listed when *any* of its candidates clears the
+    # bar, mirroring the compiler's per-candidate drop. The caller's
+    # organization floor composes with an explicit ``residency=`` param
+    # under the same max() rule and applies even when the param is absent:
+    # the catalog never advertises a model the caller's own org policy
+    # would refuse at inference.
+    caller_org_id: uuid.UUID | None = None
+    if auth[0] is not None:
+        caller_org_id = await organization_for_workspace_id(db, auth[0].workspace_id)
+    elif session_identity is not None:
+        caller_org_id = session_identity.active_organization_id
+    org_floor = await OrganizationRepository(db).get_residency_floor(caller_org_id)
+    try:
+        required_level, _ = combine_residency_bars(residency, org_floor)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    if required_level > 1:
+        rows = await list_sovereignty_rows(db, organization_id=caller_org_id)
+        sovereignty_map = build_sovereignty_map(config, rows)
+        aliases = catalog.aliases
+        dynamic_reachable = {
+            name: [normalize_pricing_key(config, selector) for selector in spec.static_selectors()]
+            for name, spec in catalog.dynamic_policies.items()
+        }
+
+        def _clears_bar(model_id: str) -> bool:
+            candidates = dynamic_reachable.get(model_id)
+            if candidates is None:
+                target = aliases[model_id] if model_id in aliases else model_id
+                candidates = [normalize_pricing_key(config, target)]
+            return any(
+                is_sovereign_enough(
+                    sovereignty_map,
+                    candidate.partition(":")[0],
+                    candidate.partition(":")[2],
+                    required_level,
+                )[0]
+                for candidate in candidates
+            )
+
+        merged = {mid: obj for mid, obj in merged.items() if _clears_bar(mid)}
+
+    return ModelListResponse(data=sorted(merged.values(), key=lambda m: m.id))
 
 
 # Served before GET /models/{model_id:path}, which FastAPI would otherwise match

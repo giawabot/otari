@@ -171,6 +171,7 @@ _GATEWAY_INTERNAL_FIELDS = (
     "max_tool_iterations",
     "session_label",
     "user",
+    "residency",
 )
 
 

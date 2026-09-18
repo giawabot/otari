@@ -95,6 +95,12 @@ class UsageLog(Base):
     # checked, and mis-price the half that were the other one.
     cache_tokens_in_prompt: Mapped[bool | None] = mapped_column()
     billing_meters: Mapped[dict[str, Any] | None] = mapped_column(JSON)
+    # Proof-of-routing for residency requests: the bar the caller asked for
+    # (``requested_residency``) and the sovereignty level that actually
+    # served the row (``served_sovereignty_level``). Null on every row for a
+    # request that carried no residency bar, so the column reads as "this
+    # request was residency-gated" rather than defaulting everyone to level 1.
+    residency_audit: Mapped[dict[str, Any] | None] = mapped_column(JSON)
     pricing_breakdown: Mapped[list[dict[str, Any]] | None] = mapped_column(JSON)
     # The settled amount, and the accounting truth for this row
     # (mozilla-ai/otari-ai#1751). Exact to the micro-dollar; see
@@ -207,6 +213,7 @@ class UsageLog(Base):
             "cache_write_1h_tokens": self.cache_write_1h_tokens,
             "cache_tokens_in_prompt": self.cache_tokens_in_prompt,
             "billing_meters": self.billing_meters,
+            "residency_audit": self.residency_audit,
             "pricing_breakdown": self.pricing_breakdown,
             "cost": self.cost,
             "status": self.status,

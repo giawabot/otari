@@ -1634,8 +1634,33 @@ class GatewayConfig(BudgetSettings, PricingSettings, BaseSettings):
             if models is not None and not (isinstance(models, list) and all(isinstance(m, str) for m in models)):
                 msg = f"providers.{instance}.models must be a list of model id strings."
                 raise ValueError(msg)
+            sovereignty = entry.get("sovereignty")
+            if sovereignty is not None:
+                self._validate_provider_sovereignty(instance, sovereignty)
             if not entry:
                 self._warn_on_uncredentialed_bare_entry(instance)
+
+    @staticmethod
+    def _validate_provider_sovereignty(instance: str, sovereignty: Any) -> None:
+        """Validate a ``providers.<instance>.sovereignty`` block at startup.
+
+        The level must be an int 1-4 (the internal sovereignty scale); a
+        typo here would otherwise surface per-request as a resolver error,
+        or worse, silently attest a provider at the wrong level.
+        """
+        if not isinstance(sovereignty, dict):
+            msg = f"providers.{instance}.sovereignty must be a mapping."
+            raise ValueError(msg)
+        level = sovereignty.get("level")
+        if not isinstance(level, int) or isinstance(level, bool) or not 1 <= level <= 4:
+            msg = f"providers.{instance}.sovereignty.level must be an int 1-4, got {level!r}."
+            raise ValueError(msg)
+        if not sovereignty.get("hosted_in") or not sovereignty.get("operator_jurisdiction"):
+            msg = (
+                f"providers.{instance}.sovereignty must declare hosted_in and operator_jurisdiction "
+                "alongside the level."
+            )
+            raise ValueError(msg)
 
     def _warn_on_uncredentialed_bare_entry(self, instance: str) -> None:
         """Warn when a settings-less entry names a provider that needs a credential.

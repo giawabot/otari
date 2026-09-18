@@ -231,6 +231,9 @@ class UsageEntry(BaseModel):
     attempt_position: int | None = None
     attempt_count: int | None = None
     request_group_id: str | None = None
+    # Residency proof-of-routing: the bar the caller asked for and the
+    # sovereignty level that served. Null for an ungated request.
+    residency_audit: dict[str, Any] | None = None
 
     @classmethod
     def from_model(
@@ -272,6 +275,7 @@ class UsageEntry(BaseModel):
             attempt_position=log.attempt_position,
             attempt_count=log.attempt_count,
             request_group_id=log.request_group_id,
+            residency_audit=log.residency_audit,
         )
 
 

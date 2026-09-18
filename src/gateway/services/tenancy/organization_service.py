@@ -83,6 +83,7 @@ from gateway.repositories.users_repository import (
 )
 from gateway.services.mail import Mailer
 from gateway.services.secret_box import secret_box_configured
+from gateway.services.sovereignty_access import parse_residency_bar
 from gateway.services.tenancy.deployment_user_service import DeploymentUserService
 from gateway.services.tenancy.email_address import validated_email as _validated_email
 from gateway.services.tenancy.errors import (
@@ -97,6 +98,7 @@ from gateway.services.tenancy.errors import (
     OrganizationNameRequiredError,
     OrganizationNotFoundError,
     OrganizationSlugUnavailableError,
+    TenancyValidationError,
     WorkspaceNotFoundError,
 )
 from gateway.services.tenancy.invitation_email import render_invitation_email
@@ -618,6 +620,35 @@ class OrganizationService:
             organization=updated,
             workspace_memberships=await self._caller_workspace_memberships(user=user, organization=updated),
         )
+
+    async def update_residency_floor_for_user(
+        self,
+        *,
+        user: User,
+        residency_floor: str | None,
+    ) -> OrganizationPublic:
+        """Set or clear the caller's organization's residency floor.
+
+        Organization owners and admins only. The floor binds every request
+        the organization's keys make, composed with a caller's own bar by
+        ``max()``: a member cannot lower it from the request body, and a
+        key's ``allowed_models: null`` is not an exemption. An unknown bar
+        name is refused rather than read as "no floor".
+        """
+        organization = await self.get_active_organization_for_user(user)
+        await self.require_active_organization_management_access(user=user, organization=organization)
+
+        normalized: str | None = None
+        if residency_floor is not None:
+            try:
+                parse_residency_bar(residency_floor)
+            except ValueError as exc:
+                raise TenancyValidationError(str(exc)) from exc
+            normalized = residency_floor.strip().lower()
+
+        updated = await self.organizations.update_organization(organization, {"residency_floor": normalized})
+        await self.db.commit()
+        return OrganizationPublic.model_validate(updated)
 
     # ------------------------------------------------------------------
     # Membership

@@ -35,6 +35,7 @@ from gateway.models.guardrails import GuardrailConfig
 from gateway.models.routing import MAX_CANDIDATES, PolicySpec, WhenClause
 from gateway.services.model_access import is_model_allowed
 from gateway.services.provider_kwargs import resolve_provider_selector
+from gateway.services.sovereignty_access import SovereigntyMap, is_sovereign_enough
 from gateway.services.tenancy.org_provider_key_service import cached_org_model_restriction
 from gateway.types.attempt import Attempt
 from gateway.types.budget_state import BudgetState
@@ -263,6 +264,8 @@ def compile_policy(
     budget: BudgetState | None = None,
     router_ordering: RouterOrdering | None = None,
     workspace_id: uuid.UUID | None = None,
+    required_sovereignty: int = 1,
+    sovereignty: SovereigntyMap | None = None,
 ) -> CompiledPlan:
     """Turn ``spec`` into an ordered plan for one request.
 
@@ -324,6 +327,16 @@ def compile_policy(
                 DroppedCandidate(selector, "not_allowed", "is not in allowed_models for this caller")
             )
             continue
+        # Residency bar (NorthRouter): every candidate in the compiled plan,
+        # head and failover alike, must clear the request's required
+        # sovereignty level. Checked here rather than at dispatch so a
+        # fallover cannot bypass the bar the way the allow-list check exists
+        # to prevent it bypassing the allow-list.
+        if required_sovereignty > 1 and sovereignty is not None:
+            allowed, why = is_sovereign_enough(sovereignty, resolved.instance, resolved.model, required_sovereignty)
+            if not allowed:
+                dropped.append(DroppedCandidate(selector, "residency", why))
+                continue
         # Organization-scoped model restriction (otari#643), same disjointness
         # condition `provider_kwargs.get_provider_kwargs` uses: only a selector
         # that named no configured instance can have resolved through an
