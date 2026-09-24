@@ -45,6 +45,8 @@ comparing wording would fight that compression forever.
 ## Architecture (Big Picture)
 For the open-core OSS/enterprise seam (ports, adapters, the capability lines, and the rules for keeping the boundary), see [ARCHITECTURE.md](ARCHITECTURE.md). It is a north-star document describing the intended architecture, so ground current-state work in `src/gateway/`.
 
+Read it before adding a capability, introducing a port, or moving code across a layer. [Where new code goes](ARCHITECTURE.md#where-new-code-goes) says which kind of change lands where, and [Cardinal rules for contributors](ARCHITECTURE.md#cardinal-rules-for-contributors) holds the rules that keep the seam from eroding. Those rules are not advisory prose: the architecture check under [Lint / Typecheck](#lint--typecheck) is their mechanical half, and the [PR template](.github/pull_request_template.md) asks a change that alters a rule in `ARCHITECTURE.md` or in that script to name the rule and say why.
+
 ### Runtime modes
 - Mode is derived when `OTARI_MODE` is unset, and honored when set: `GatewayConfig.is_hybrid_mode` / `effective_mode` (`src/gateway/core/config.py`) return `hybrid` when the config field `mode` is `hybrid` (legacy `platform`) or, when `mode` is unset, when the platform token (`OTARI_AI_TOKEN`) is set; otherwise `standalone`. Startup validation (`validate_mode_selection`) rejects the conflicting combinations: `OTARI_MODE=hybrid` (legacy value `platform`) without a token, and `OTARI_MODE=standalone` or `OTARI_MODE=hosted` with a token set (the token would otherwise silently select hybrid). The token is resolved once at config-load time (cached on the config), not re-read from `os.getenv` on every access.
 - **Standalone**: provider credentials come from the `providers:` block in `config.yml`; users/keys/budgets/usage live in the local DB. All routers are registered.
@@ -55,6 +57,7 @@ For the open-core OSS/enterprise seam (ports, adapters, the capability lines, an
 The per-request flow (auth → budget → dispatch → reconciliation) spans several files and is documented in [src/gateway/AGENTS.md](src/gateway/AGENTS.md). Read it before changing request behavior.
 
 ## Lint / Typecheck
+- Prefer a `make` target to the tool it wraps, and read `make help` before reaching past one: the target list grows, so something that had no target last time may have one now. A target bundles checks the bare tool skips, which is how a check goes unrun when the tool is called directly. Where `make help` offers nothing, call the tool; formatting (`uv run ruff format`) and the dashboard's own checks (pnpm, below) are the gaps today.
 - Run lint checks with `make lint`; it runs the architecture check and then Ruff. **Ruff alone is not equivalent.**
 - The architecture check (`scripts/check_architecture.py`, also `make check-architecture`) enforces the `src/gateway/` layer rules: services must not import the API layer, repositories must not import services or the API layer, schemas must not import services, repositories, exceptions, the API layer or the composition root, API routes must not import `sqlalchemy.orm`, `gateway/main.py` must not import a route module, a service or a route must not import the feature registry (`gateway/features.py`), nothing under `gateway/` imports an entry-point discovery module (`importlib.metadata`, `importlib_metadata`, `pkg_resources`), repository modules end in `_repository.py` (a module that bundles a domain's repositories, in `_repositories.py`), `src/` holds no top-level package but `gateway`, and nothing under `services/` or `api/routes/` imports `sqlalchemy` or `sqlmodel` unless it is on that layer's baseline of modules that still do. Both baselines only shrink: an entry that stops importing either fails the check until it is removed. `services/` and `repositories/` gain no top-level module unless it is on the check's baseline of flat modules that exist, so new code goes in its domain's package. An entry whose module no longer exists fails the check until it is removed. Only the Unit of Work calls `commit()` or `rollback()`, unless the module is on the check's baseline of modules that still call either, only `repositories/` imports `session_for`, and only `get_unit_of_work` or a worker factory in `core/unit_of_work.py` constructs a `UnitOfWork`.
 - **`make lint` does not touch the dashboard.** `pnpm --dir web run lint` is its counterpart (Biome: formatting, recommended rules, and the `web/src/` layer boundaries), run separately in CI. See [web/AGENTS.md](web/AGENTS.md) for what those boundaries are and why the config mirrors `otari-ai/frontend`.
@@ -136,6 +139,24 @@ The per-request flow (auth → budget → dispatch → reconciliation) spans sev
   gateway-owned mirror model would silently drop any content block type a
   future mcp adds), so the cost is paid here rather than in the response shape.
 
+## Docs
+`docs/` is the published documentation, and [docs/index.md](docs/index.md) is its map,
+grouped by reader: start here, operators, integrators, platform builders, contributors.
+Read the page covering the area you are changing before you change it, and update that
+page in the same PR when behavior moves. Nothing fails when a docs page goes stale,
+unlike the artifacts above, so a reader finds the drift rather than CI.
+
+Some pages bind code rather than describe it:
+
+- [docs/domains.md](docs/domains.md) is the backend's target shape. It assigns every
+  module under `services/`, `api/routes/`, `models/` and `repositories/` to one domain
+  and gives what each layer holds. New backend code goes where that page puts its
+  domain, not beside the code it most resembles.
+- [docs/hybrid-mode-protocol.md](docs/hybrid-mode-protocol.md) and
+  [docs/code-execution-protocol.md](docs/code-execution-protocol.md) are the wire
+  contracts a peer implements. They are normative for the semantics a schema cannot
+  carry, so a change to the wire is a change to the page first.
+
 ## Repository Conventions
 - Prefer minimal, targeted edits over broad refactors, and match the import order and typing style of the file you are in (`TYPE_CHECKING` for type-only imports where it helps, as in `routes/_helpers.py`).
 - Add a comment only where the logic is not obvious; keep docstrings concise and meaningful on public functions and classes. Do not restate the code, narrate the change, or record what the code used to do: the commit message is where that belongs. Leave the comments around a change shorter than you found them: prune narration, repeated rationale, and implementation history as you touch them.
@@ -153,6 +174,11 @@ The per-request flow (auth → budget → dispatch → reconciliation) spans sev
 - If you touched auth headers or key handling, run key-management and auth-related tests.
 - If OpenAPI-affecting code changed, including a route docstring, regenerate and commit **both**
   generated artifacts (see Generated Artifacts above).
+- If you moved code across a layer, added a port, or bound an adapter, check the change
+  against [Cardinal rules for contributors](ARCHITECTURE.md#cardinal-rules-for-contributors)
+  and run `make lint`.
+- If you changed behavior a docs page describes, update that page in the same PR (see Docs
+  above). A new backend module owes [docs/domains.md](docs/domains.md) its domain.
 
 ## Writing style
 
