@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gateway.api.deps import (
     CodeExecutionPortDep,
     ModelProviderPortDep,
+    OptionalFileServiceDep,
     build_sandbox_container_registry,
     build_sandbox_file_bridge,
     get_config,
@@ -55,7 +56,7 @@ from gateway.log_config import logger
 from gateway.models.guardrails import GuardrailConfig
 from gateway.models.mcp import MAX_MCP_SERVER_IDS, McpServerConfig
 from gateway.models.tools import CodeExecutor
-from gateway.services.file_service import StagedFile
+from gateway.services.files import StagedFile
 from gateway.services.log_writer import LogWriter
 from gateway.services.mcp_loop import ToolBackend
 from gateway.services.mcp_loop_responses import (
@@ -520,6 +521,7 @@ async def create_response(
     request_body: ResponsesRequest,
     db: Annotated[AsyncSession | None, Depends(get_db_if_needed)],
     uow: Annotated[UnitOfWork | None, Depends(get_unit_of_work_if_needed)],
+    files: OptionalFileServiceDep,
     config: Annotated[GatewayConfig, Depends(get_config)],
     log_writer: Annotated[LogWriter, Depends(get_log_writer)],
     model_provider: ModelProviderPortDep,
@@ -559,8 +561,7 @@ async def create_response(
             config=config,
             provider=provider,
             model=model,
-            db=db,
-            raw_request=raw_request,
+            files=files,
             user_id=user_id,
             instance=instance,
             workspace_id=workspace_id,

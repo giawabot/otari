@@ -30,6 +30,7 @@ from gateway.ports.model_provider_port import ModelProviderPort
 from gateway.ports.telemetry_storage_port import TelemetryStoragePort
 from gateway.repositories.api_keys import ApiKeyRepository
 from gateway.repositories.budgets import BudgetRepositories
+from gateway.repositories.files import FileRepositories
 from gateway.repositories.overview.overview_repository import OverviewRepository
 from gateway.repositories.providers import OrgProviderKeyModelRepository
 from gateway.repositories.tenancy import OrganizationGuardrailDefinitionRepository, OrgProviderKeyRepository
@@ -37,8 +38,7 @@ from gateway.services.api_keys import ApiKeyService
 from gateway.services.budgets import BudgetService, WorkspaceBudgetDefaultService
 from gateway.services.code_execution import SandboxContainerRegistry
 from gateway.services.dashboard_session_service import SESSION_COOKIE_NAME, resolve_dashboard_session
-from gateway.services.file_service import StagedFile
-from gateway.services.files import SandboxFileBridge
+from gateway.services.files import FileService, SandboxFileBridge, StagedFile
 from gateway.services.log_writer import LogWriter
 from gateway.services.master_key_service import hash_master_key, is_generated_master_key, load_master_key_hash
 from gateway.services.organization_pricing_service import OrganizationPricingService
@@ -53,6 +53,7 @@ from gateway.services.tenancy.organization_guardrail_definition_service import (
 )
 from gateway.services.tenancy.provisioning_service import ensure_bootstrap_identity
 from gateway.services.tenancy.workspace_service import WorkspaceService
+from gateway.services.workspace_scope import default_workspace_id
 
 # Legacy module-level fallback. Config now lives on ``app.state.config`` (set in
 # ``create_app``); ``get_config`` reads from the request's app state and only
@@ -662,6 +663,7 @@ def build_sandbox_file_bridge(
         file_store=file_store,
         config=config,
         uow=uow,
+        files=FileRepositories.on(uow).files,
         user_id=user_id,
         workspace_id=workspace_id,
         inputs=inputs,
@@ -1030,6 +1032,52 @@ def get_file_store(request: Request) -> FileStoragePort:
     return store
 
 
+def get_file_service(
+    uow: Annotated[UnitOfWork, Depends(get_unit_of_work)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+    config: Annotated[GatewayConfig, Depends(get_config)],
+    file_store: Annotated[FileStoragePort, Depends(get_file_store)],
+) -> FileService:
+    """Build the request's files service on the request's Unit of Work."""
+    return FileService(uow, FileRepositories.on(uow), file_store, config, lambda: default_workspace_id(db))
+
+
+FileServiceDep = Annotated[FileService, Depends(get_file_service)]
+
+
+def get_file_store_if_needed(request: Request) -> FileStoragePort | None:
+    """Return the configured blob store in standalone mode, otherwise ``None``.
+
+    The counterpart of ``get_file_store``, for a route that serves both modes. A
+    hybrid gateway binds none, so the attribute is absent rather than set to None.
+    """
+    store: FileStoragePort | None = getattr(request.app.state, "file_store", None)
+    return store
+
+
+def get_file_service_if_needed(
+    config: Annotated[GatewayConfig, Depends(get_config)],
+    db: Annotated[AsyncSession | None, Depends(get_db_if_needed)],
+    uow: Annotated[UnitOfWork | None, Depends(get_unit_of_work_if_needed)],
+    file_store: Annotated[FileStoragePort | None, Depends(get_file_store_if_needed)],
+) -> FileService | None:
+    """Return the request's files service in standalone mode, otherwise ``None``.
+
+    The counterpart of ``get_file_service``, for a completion route that serves both
+    modes. Hybrid mode has no local database and no blob store, so a stored
+    ``file_id`` cannot be resolved there at all.
+
+    NOTE: a route must take its session from ``get_db_if_needed`` as well, for the
+    reason ``get_unit_of_work_if_needed`` gives.
+    """
+    if uow is None or db is None or file_store is None:
+        return None
+    return FileService(uow, FileRepositories.on(uow), file_store, config, lambda: default_workspace_id(db))
+
+
+OptionalFileServiceDep = Annotated[FileService | None, Depends(get_file_service_if_needed)]
+
+
 async def _caller_organization_id(
     db: Annotated[AsyncSession, Depends(get_db)],
     identity: CurrentIdentity,
@@ -1059,6 +1107,8 @@ __all__ = [
     "CallerOrganization",
     "CurrentIdentity",
     "EntitlementPortDep",
+    "FileServiceDep",
+    "OptionalFileServiceDep",
     "OverviewServiceDep",
     "GrowthSignalPortDep",
     "IdentityProviderPortDep",

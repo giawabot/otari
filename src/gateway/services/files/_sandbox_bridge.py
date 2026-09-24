@@ -12,20 +12,16 @@ from gateway.core.database import DATABASE_ERRORS
 from gateway.core.unit_of_work import UnitOfWork
 from gateway.log_config import logger
 from gateway.ports.file_storage_port import FileStoragePort
-from gateway.repositories.files import OutputFileRow, existing_file_ids, record_output_file
-from gateway.services.file_service import (
-    CODE_EXECUTION_OUTPUT_PURPOSE,
-    StagedFile,
-    expiry_for,
-    guess_mime_type,
-)
-from gateway.services.files.provider_files import (
+from gateway.repositories.files import FileRepository, OutputFileRow
+from gateway.services.files._metadata import expiry_for, guess_mime_type
+from gateway.services.files._provider_files import (
     FileOverBudgetError,
     ProviderFile,
     ProviderFileClient,
     ProviderFileUnavailableError,
     serves_files,
 )
+from gateway.services.files._staging import CODE_EXECUTION_OUTPUT_PURPOSE, StagedFile
 
 # A missing credential or a database failure, which stop a copy before it starts.
 _COPY_SETUP_ERRORS: tuple[type[BaseException], ...] = (LookupError, ValueError, *DATABASE_ERRORS)
@@ -57,6 +53,7 @@ class SandboxFileBridge:
         file_store: FileStoragePort,
         config: GatewayConfig,
         uow: UnitOfWork,
+        files: FileRepository,
         user_id: str,
         workspace_id: uuid.UUID,
         inputs: list[StagedFile],
@@ -65,6 +62,7 @@ class SandboxFileBridge:
         self._file_store = file_store
         self._config = config
         self._uow = uow
+        self._files = files
         self._user_id = user_id
         self._workspace_id = workspace_id
         self.inputs = inputs
@@ -137,7 +135,7 @@ class SandboxFileBridge:
                 )
                 await stack.enter_async_context(contextlib.aclosing(client))
                 async with self._uow:
-                    known = await existing_file_ids(self._uow, [file.file_id for file in new])
+                    known = await self._files.existing_ids([file.file_id for file in new])
             except _COPY_SETUP_ERRORS as exc:
                 logger.warning("Not copying %d %s file(s): %s", len(new), provider, exc)
                 return
@@ -211,17 +209,31 @@ class SandboxFileBridge:
         return size
 
     async def _record(self, row: OutputFileRow) -> None:
-        """Record ``row`` in a block of its own, and remove its blob when the row does not land."""
+        """Record ``row`` in a block of its own, and remove its blob when the row does not land.
+
+        A cancellation raised inside the block is cleaned up, because the
+        commit cannot have run yet. One arriving while the block commits is not:
+        its outcome is unknown, and removing the bytes could strand a row that
+        did land. An orphan the reclaim pass can find is the smaller failure.
+        """
         try:
             async with self._uow:
-                await record_output_file(self._uow, row)
-        except BaseException:
+                try:
+                    await self._files.record_output(row)
+                except BaseException:
+                    # Raised inside the block, so the commit has not been
+                    # reached and no row can have landed. Cancellation included.
+                    await self._discard(row.storage_ref)
+                    raise
+        except Exception:
+            # The commit itself failed and rolled back. Cancellation stays
+            # uncaught here, where its outcome is unknown.
             await self._discard(row.storage_ref)
             raise
 
     async def _discard(self, storage_ref: str) -> None:
         """Remove a blob that no row points at."""
-        # Shielded so a cancellation already in flight cannot cut the
-        # cleanup short and leave the orphan it exists to prevent.
+        # Shielded so the delete still runs while a cancellation unwinds. The
+        # shield detaches it, so its completion is not waited for.
         with contextlib.suppress(Exception):
             await asyncio.shield(self._file_store.delete(storage_ref))
