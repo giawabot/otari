@@ -51,7 +51,7 @@ def _past(key: tuple[datetime, str], *, ascending: bool) -> ColumnElement[bool]:
 
 @dataclass(frozen=True)
 class OutputFileRow:
-    """One file a code-execution run produced, already resolved to its columns."""
+    """Metadata for a produced file whose bytes have already been stored."""
 
     file_id: str
     user_id: str
@@ -62,7 +62,6 @@ class OutputFileRow:
     purpose: str
     storage_ref: str
     expires_at: datetime | None
-    # Set when a provider's own sandbox produced the file, naming where it came from.
     provider: str | None = None
     provider_instance: str | None = None
     provider_container_id: str | None = None

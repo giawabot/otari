@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Sequence
+from collections.abc import AsyncGenerator, AsyncIterator, Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -21,7 +21,8 @@ from gateway.exceptions.files_exceptions import (
 from gateway.log_config import logger
 from gateway.models.files import FileObject
 from gateway.ports.file_storage_port import FileStoragePort
-from gateway.repositories.files import FilePageQuery, FileRepositories
+from gateway.repositories.files import FilePageQuery, FileRepositories, OutputFileRow
+from gateway.services.files._cleanup import discard_output_bytes
 from gateway.services.files._file_ids import file_id_in, page_token
 from gateway.services.files._metadata import expiry_for, guess_mime_type
 from gateway.services.files._staging import StagedFile
@@ -75,6 +76,24 @@ class NewFile:
 
 
 @dataclass(frozen=True)
+class NewOutput:
+    """A produced file to register after its bytes have been stored."""
+
+    file_id: str
+    user_id: str
+    workspace_id: uuid.UUID
+    filename: str
+    mime_type: str
+    bytes: int
+    purpose: str
+    storage_ref: str
+    expires_at: datetime | None
+    provider: str | None = None
+    provider_instance: str | None = None
+    provider_container_id: str | None = None
+
+
+@dataclass(frozen=True)
 class FileListing:
     """One page of a caller's files, as the request asked for it."""
 
@@ -106,6 +125,18 @@ class FileContent:
     chunks: AsyncGenerator[bytes, None]
     filename: str
     mime_type: str
+
+
+@dataclass(frozen=True)
+class SweepBatch:
+    """One cleanup batch and the key that resumes scanning after it."""
+
+    reclaimed: int
+    # Rows inspected, including failed deletions. A short batch ends this scan.
+    seen: int
+    # Last inspected (created_at, id), or None for an empty batch. Advance past
+    # failed deletions so they do not block later candidates in the same tick.
+    cursor: tuple[datetime, str] | None
 
 
 class FileService:
@@ -158,7 +189,9 @@ class FileService:
                     # Resolved here rather than before the upload: it reads the
                     # database, and doing that first would hold the session's
                     # transaction open for as long as the bytes take to store.
-                    workspace_id = upload.workspace_id or await self._default_workspace()
+                    workspace_id = upload.workspace_id
+                    if workspace_id is None:
+                        workspace_id = await self._default_workspace()
                     record = FileObject(
                         id=file_id,
                         user_id=upload.user_id,
@@ -323,6 +356,62 @@ class FileService:
             except OSError as exc:
                 logger.warning("Discarded file %s but failed to remove its blob %s: %s", file_id, storage_ref, exc)
 
+    async def existing_output_ids(self, file_ids: Collection[str]) -> set[str]:
+        """Identify already-recorded output IDs without returning their contents or owners."""
+        async with self._uow:
+            return await self._files.existing_ids(file_ids)
+
+    async def record_output(self, output: NewOutput) -> None:
+        """Record stored output, cleaning up on failure but not on an uncertain commit."""
+        staged = False
+        try:
+            row = OutputFileRow(
+                file_id=output.file_id,
+                user_id=output.user_id,
+                workspace_id=output.workspace_id,
+                filename=output.filename,
+                mime_type=output.mime_type,
+                bytes=output.bytes,
+                purpose=output.purpose,
+                storage_ref=output.storage_ref,
+                expires_at=output.expires_at,
+                provider=output.provider,
+                provider_instance=output.provider_instance,
+                provider_container_id=output.provider_container_id,
+            )
+            async with self._uow:
+                await self._files.record_output(row)
+                staged = True
+        except BaseException:
+            # A commit error can follow a successful database commit.
+            # Before staging completes, no output can have committed.
+            if not staged:
+                await discard_output_bytes(self._file_store, output.storage_ref)
+            raise
+
+    async def sweep(self, *, batch_size: int, after: tuple[datetime, str] | None = None) -> SweepBatch:
+        """Delete expired or revoked bytes between short database transactions."""
+        async with self._uow:
+            records = await self._files.reclaimable(batch_size=batch_size, after=after)
+            candidates = [(record.id, record.storage_ref, record.created_at) for record in records]
+        reclaimed: list[str] = []
+        for file_id, storage_ref, _ in candidates:
+            try:
+                if storage_ref is not None:
+                    await self._file_store.delete(storage_ref)
+            except FileNotFoundError:
+                pass
+            except OSError as exc:
+                logger.warning("File sweep could not remove bytes for %s: %s", file_id, exc)
+                continue
+            reclaimed.append(file_id)
+        if reclaimed:
+            async with self._uow:
+                await self._files.remove_all(reclaimed)
+            logger.info("File sweep reclaimed %d file(s)", len(reclaimed))
+        cursor = (candidates[-1][2], candidates[-1][0]) if candidates else None
+        return SweepBatch(reclaimed=len(reclaimed), seen=len(candidates), cursor=cursor)
+
     async def _drop_orphan(self, storage_ref: str, file_id: str) -> None:
         """Remove bytes that no row points at, best effort.
 
@@ -342,9 +431,7 @@ class FileService:
         between two pages still says where the next page starts. Another user's
         ID names no position.
         """
-        cursor = await self._files.any_owned(
-            cursor_id, listing.scope.user_id, workspace_id=listing.scope.workspace_id
-        )
+        cursor = await self._files.any_owned(cursor_id, listing.scope.user_id, workspace_id=listing.scope.workspace_id)
         if cursor is None:
             if listing.dialect is FileDialect.ANTHROPIC:
                 raise UnknownPageCursorError
