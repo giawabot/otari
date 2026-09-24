@@ -75,14 +75,12 @@ from gateway.services.mcp_loop_messages import (
     MAX_TOOL_ITERATIONS_CAP,
     MCP_ACTIVITY_ID_PREFIX,
     MCP_CLIENT_BETA,
-    SERVER_TOOL_USE_ID_PREFIX,
-    WEB_SEARCH_TOOL_USE_ID_PREFIX,
     anthropic_tool_loop,
     anthropic_tool_loop_stream,
 )
 from gateway.services.sandbox_backend import CODE_EXECUTION_TOOL_NAME
 from gateway.services.tool_format import inject_purpose_hints_anthropic, openai_to_anthropic_tools
-from gateway.services.web_search_budget import WebSearchBudget
+from gateway.services.tools import SERVER_TOOL_USE_ID_PREFIX, Dialect, ToolUseBudget
 from gateway.streaming import ANTHROPIC_STREAM_FORMAT, StreamFormat
 from gateway.types.attempt import Attempt
 
@@ -222,7 +220,7 @@ def _is_gateway_minted_result(block: Any) -> bool:
     """Whether a ``web_search_tool_result`` block was minted by this gateway.
 
     Provenance is the reserved id prefix the gateway mints its ``server_tool_use``
-    with (``mcp_loop_messages.WEB_SEARCH_TOOL_USE_ID_PREFIX``), matched here on the
+    with (:data:`~gateway.services.tools.SERVER_TOOL_USE_ID_PREFIX`), matched here on the
     ``tool_use_id`` the result carries back. Anthropic issues ``srvtoolu_`` ids of its
     own and cannot produce that prefix, so a provider's blocks survive untouched
     whatever they contain, including a ``max_uses_exceeded`` error from its own capped
@@ -237,7 +235,7 @@ def _is_gateway_minted_result(block: Any) -> bool:
     """
     if not isinstance(block, dict) or block.get("type") != "web_search_tool_result":
         return False
-    if str(block.get("tool_use_id") or "").startswith(WEB_SEARCH_TOOL_USE_ID_PREFIX):
+    if str(block.get("tool_use_id") or "").startswith(SERVER_TOOL_USE_ID_PREFIX):
         return True
     hits = block.get("content")
     if not isinstance(hits, list):
@@ -533,7 +531,7 @@ class _MessagesAdapter:
     and friends.
     """
 
-    name = "messages"
+    name = Dialect.MESSAGES
     endpoint = USAGE_ENDPOINT
     stream_format: StreamFormat = ANTHROPIC_STREAM_FORMAT
     # A successful non-streaming call without provider usage data skips the
@@ -624,9 +622,8 @@ class _MessagesAdapter:
         max_iterations: int,
         on_first_response: Callable[[], None] | None = None,
         *,
-        emit_native_web_search: bool = False,
-        emit_native_code_execution: bool = False,
-        web_search_budget: WebSearchBudget | None = None,
+        native_tools: frozenset[str] = frozenset(),
+        use_budget: ToolUseBudget | None = None,
         container: ContainerLease | None = None,
     ) -> MessageResponse:
         # Standalone dispatch has no lock-in callback; only pass the kwarg on
@@ -634,10 +631,10 @@ class _MessagesAdapter:
         extra: dict[str, Any] = {}
         if on_first_response is not None:
             extra["on_first_response"] = on_first_response
-        if web_search_budget is not None:
-            extra["web_search_budget"] = web_search_budget
-        if emit_native_code_execution:
-            extra["emit_native_code_execution"] = True
+        if use_budget is not None:
+            extra["use_budget"] = use_budget
+        if native_tools:
+            extra["native_tools"] = native_tools
         if container is not None:
             extra["container"] = container
         provider_kwargs, _ = _split_client_betas(kwargs)
@@ -645,7 +642,6 @@ class _MessagesAdapter:
             completion_kwargs=provider_kwargs,
             pool=pool,
             max_iterations=max_iterations,
-            emit_native_web_search=emit_native_web_search,
             **extra,
         )
 
@@ -655,26 +651,24 @@ class _MessagesAdapter:
         pool: ToolBackend,
         max_iterations: int,
         *,
-        emit_native_web_search: bool = False,
-        emit_native_code_execution: bool = False,
-        web_search_budget: WebSearchBudget | None = None,
+        native_tools: frozenset[str] = frozenset(),
+        use_budget: ToolUseBudget | None = None,
         container: ContainerLease | None = None,
     ) -> AsyncIterator[MessageStreamEvent]:
         provider_kwargs, emit_native_mcp = _split_client_betas(kwargs)
         extra: dict[str, Any] = {}
         if emit_native_mcp:
             extra["emit_native_mcp"] = True
-        if web_search_budget is not None:
-            extra["web_search_budget"] = web_search_budget
-        if emit_native_code_execution:
-            extra["emit_native_code_execution"] = True
+        if use_budget is not None:
+            extra["use_budget"] = use_budget
+        if native_tools:
+            extra["native_tools"] = native_tools
         if container is not None:
             extra["container"] = container
         return anthropic_tool_loop_stream(
             completion_kwargs=provider_kwargs,
             pool=pool,
             max_iterations=max_iterations,
-            emit_native_web_search=emit_native_web_search,
             **extra,
         )
 
