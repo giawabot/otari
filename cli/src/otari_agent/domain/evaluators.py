@@ -33,7 +33,10 @@ from otari_agent.domain.types import (
 # A subshell's parentheses are separators too: what they enclose is a command
 # of its own, and "(npm install)" must reach _contains_subsequence with "npm"
 # at its segment's head, not glued to the paren.
-_COMMAND_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")"})
+# Public because domain/validation.py needs the same set to tell an author
+# that a phrase carrying one of these can never match: a phrase matches a
+# contiguous token run *within* one segment, and these are what end a segment.
+COMMAND_SEPARATORS = frozenset({"&&", "||", ";", "|", "&", "(", ")"})
 
 # Bash's own metacharacter set: the unquoted characters that end a word, so
 # a `#` directly after one still starts a comment and a separator directly
@@ -395,7 +398,7 @@ def _command_segments(command: str) -> list[list[str]]:
     Strips a trailing comment, pads every unquoted separator and bare newline
     so shlex will isolate it (`_normalize_separators`), then tokenizes with
     `shlex` (POSIX quoting rules), then splits the resulting token list on
-    any token that is exactly one of `_COMMAND_SEPARATORS`: a quoted argument
+    any token that is exactly one of `COMMAND_SEPARATORS`: a quoted argument
     that happens to contain that text, like `"a && b"`, survives as a single
     token from shlex and is never mistaken for a separator, since this only
     looks at whole tokens, never substrings of one.
@@ -455,7 +458,7 @@ def _command_segments(command: str) -> list[list[str]]:
 
     segments: list[list[str]] = [[]]
     for token in tokens:
-        if token in _COMMAND_SEPARATORS:
+        if token in COMMAND_SEPARATORS:
             segments.append([])
         else:
             segments[-1].append(token)
@@ -474,6 +477,23 @@ def tokenize_phrase(phrase: str) -> list[str]:
     same exception a raw `shlex.split` would.
     """
     return shlex.split(_strip_shell_comment(phrase), posix=True)
+
+
+def tokenize_phrase_with_separators(phrase: str) -> list[str]:
+    """Tokenize one phrase the way a *command* is tokenized, with separators isolated.
+
+    Deliberately not what :func:`tokenize_phrase` does, and the difference is
+    the point. Matching leaves a separator glued to its word, because a phrase
+    is matched as a contiguous token run *within* one segment and a segment
+    never contains a separator to match against. Detecting one needs the
+    opposite: the same normalization `_command_segments` applies, so that
+    `"npm install;"` yields a `;` token rather than an `install;` token that
+    silently equals nothing a command can produce.
+
+    Quote-aware through `_normalize_separators`, so `echo "a && b"` keeps its
+    argument whole and is not mistaken for a phrase spanning a boundary.
+    """
+    return shlex.split(_normalize_separators(_strip_shell_comment(phrase)), posix=True)
 
 
 def tokenize_phrases(phrases: tuple[str, ...]) -> dict[str, list[str]]:
