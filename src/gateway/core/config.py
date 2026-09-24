@@ -530,6 +530,16 @@ class GatewayConfig(BudgetSettings, PricingSettings, BaseSettings):
             "same bar as docs_url."
         ),
     )
+    site_url: Annotated[str | None, Shown(SettingsGroup.GENERAL)] = Field(
+        default=None,
+        description=(
+            "Where this deployment's public website lives, as an absolute http(s) URL "
+            "(e.g. 'https://otari.ai/'). Set, the logo on the pages a visitor reaches "
+            "without an account (the public model catalog) links to it; unset, it links to "
+            "the catalog itself. A link target an operator configured, held to the same bar "
+            "as docs_url."
+        ),
+    )
     data_plane_url: Annotated[str | None, Shown(SettingsGroup.GENERAL)] = Field(
         default=None,
         description=(
@@ -889,8 +899,8 @@ class GatewayConfig(BudgetSettings, PricingSettings, BaseSettings):
         default=False,
         description=(
             "Serve GET /api/v1/catalog/models and the dashboard's Models pages to a visitor with no session or "
-            "key. An anonymous read sees the configured provider instances priced from the deployment "
-            "list and the defaults, and nothing tenant-specific. Off by default."
+            "key. An anonymous read sees the configured provider instances and the hosted models, priced "
+            "from the deployment list and the defaults, and nothing tenant-specific. Off by default."
         ),
     )
     files_enabled: Annotated[bool, Shown(SettingsGroup.FILES)] = Field(
@@ -2026,7 +2036,7 @@ class GatewayConfig(BudgetSettings, PricingSettings, BaseSettings):
             raise ValueError(msg)
         return normalized
 
-    @field_validator("docs_url", "terms_url", "privacy_url")
+    @field_validator("docs_url", "terms_url", "privacy_url", "site_url")
     @classmethod
     def _validate_link_url(cls, value: str | None, info: ValidationInfo) -> str | None:
         """Reject a menu link that is not an absolute http(s) URL.

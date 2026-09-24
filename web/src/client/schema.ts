@@ -972,8 +972,8 @@ export interface paths {
          *     Prices are the caller's: an organization's override where one applies, else
          *     the deployment's row, else the genai-prices default. Aliases and routing
          *     policies are not models and are not listed; see Routing. A visitor, where
-         *     the catalog is public, sees the configured instances at the deployment's
-         *     rates and nothing that belongs to a tenant.
+         *     the catalog is public, sees the configured instances and the hosted
+         *     models at the deployment's rates, and nothing that belongs to a tenant.
          */
         get: operations["catalog-list_catalog"];
         put?: never;
@@ -7617,6 +7617,11 @@ export interface components {
              * @description How POST /api/v1/auth/session may be authenticated right now, sorted. 'master_key' is the first-boot credential and is offered until the operator identity has a password, which is what claiming the deployment means; past that it stays the credential for the management API but is no longer a dashboard login. 'password' is offered while any active identity holds one, which is not the same question and not always the later half of it: a member can hold a password on a deployment whose operator never claimed it, so both typed credentials can appear together. 'passkey' appears alongside either when this deployment is configured for WebAuthn and holds at least one passkey that its current relying-party ID can assert. Empty for a hybrid gateway, which issues no session. The login page renders from this rather than trying a credential to find out.
              */
             sign_in_methods: ("master_key" | "password" | "passkey")[];
+            /**
+             * Site Url
+             * @description Where this deployment's public website lives. Set, the logo on the pages a visitor reaches without an account links to it; null, it links to the public catalog. A link target an operator configured, validated at startup as an absolute http(s) URL carrying no credential, since this response is unauthenticated.
+             */
+            site_url: string | null;
             /**
              * Surfaces
              * @description Management API groups this deployment serves, sorted, which is what its dashboard pages gate on. Named surfaces, not capabilities: capability is otari.ai's word for the entitlement (licensing) axis, and this is the deployment (topology) axis. Empty for a hybrid gateway.
