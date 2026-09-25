@@ -110,12 +110,103 @@ def test_pretooluse_ignores_unhandled_tools(monkeypatch: pytest.MonkeyPatch, rep
     payload = {
         "hook_event_name": "PreToolUse",
         "cwd": str(repo),
-        "tool_name": "Read",
-        "tool_input": {"file_path": str(repo / "README.md")},
+        # Grep, not Read: Read is collected as `pre_tool_use.read_target`
+        # evidence now, and Grep is deliberately still not, since it returns
+        # matching lines rather than whole contents.
+        "tool_name": "Grep",
+        "tool_input": {"pattern": "SECRET", "path": str(repo / "README.md")},
     }
     result = _invoke(payload)
     assert result.exit_code == 0, result.output
     assert not called, "a tool call this integration does not name must never reach the Hook Server"
+
+
+@pytest.mark.parametrize("tool_name", ["Grep", "Glob"])
+def test_pretooluse_does_not_gate_the_narrow_search_tools(
+    monkeypatch: pytest.MonkeyPatch, repo: Path, tool_name: str
+) -> None:
+    """Grep and Glob stay ungated even though both name a path.
+
+    They return matching lines and file names rather than whole contents, and
+    reading one line through a narrow pattern is the mitigation a secret gate's
+    own message should recommend. Gating them would refuse the workaround.
+    """
+    called = False
+
+    def fake_post(*args: object, **kwargs: object) -> _FakeResponse:
+        nonlocal called
+        called = True
+        return _FakeResponse({"blocked": False, "results": []})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "cwd": str(repo),
+        "tool_name": tool_name,
+        "tool_input": {"path": str(repo / ".env"), "pattern": "*"},
+    }
+    result = _invoke(payload)
+    assert result.exit_code == 0, result.output
+    assert not called
+
+
+def test_pretooluse_submits_a_read_target_as_its_own_moment(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
+    """A Read call submits its target labeled `pre_tool_use.read_target`.
+
+    The label is the whole point: it is what lets a gate that asked about
+    reads see this, and what keeps it away from every path gate written before
+    reads were collectable at all.
+    """
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: object) -> _FakeResponse:
+        captured["json"] = kwargs.get("json")
+        return _FakeResponse(
+            {
+                "blocked": True,
+                "results": [
+                    {"gate_id": "no-secret-reads", "enforcement": "required", "outcome": "fail", "message": "no"}
+                ],
+            }
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "cwd": str(repo),
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(repo / ".env")},
+    }
+    result = _invoke(payload)
+    assert result.exit_code == 2, result.output
+    assert captured["json"]["paths"] == [".env"]
+    assert captured["json"]["path_source"] == "pre_tool_use.read_target"
+    assert captured["json"]["commands"] == []
+
+
+def test_a_read_outside_the_repo_submits_nothing(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
+    """Mirrors the edit branch: a path no repo-relative glob can name is not evidence."""
+    called = False
+
+    def fake_post(*args: object, **kwargs: object) -> _FakeResponse:
+        nonlocal called
+        called = True
+        return _FakeResponse({"blocked": False, "results": []})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    # The `repo` fixture is tmp_path itself, so "outside" has to climb above
+    # it rather than sit beside anything in it.
+    outside = repo.parent / "elsewhere.env"
+    outside.write_text("SECRET=1\n", encoding="utf-8")
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "cwd": str(repo),
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(outside)},
+    }
+    result = _invoke(payload)
+    assert result.exit_code == 0, result.output
+    assert not called
 
 
 def test_pretooluse_submits_a_bash_command_for_command(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
@@ -142,7 +233,7 @@ def test_pretooluse_submits_a_bash_command_for_command(monkeypatch: pytest.Monke
     result = _invoke(payload)
     assert result.exit_code == 2, result.output
     assert captured["json"]["commands"] == ["git push --force"]
-    assert captured["json"]["changed_paths"] == []
+    assert captured["json"]["paths"] == []
 
 
 def test_an_oversize_bash_command_is_truncated_rather_than_rejected(
@@ -244,7 +335,7 @@ def test_stop_event_blocks_on_git_status(monkeypatch: pytest.MonkeyPatch, repo: 
     payload = {"hook_event_name": "Stop", "cwd": str(repo)}
     result = _invoke(payload)
     assert result.exit_code == 2, result.output
-    assert captured["json"]["changed_paths"] == ["CHANGELOG.md"]
+    assert captured["json"]["paths"] == ["CHANGELOG.md"]
 
 
 def test_stop_event_evaluates_locally_and_blocks_on_git_status(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
@@ -660,7 +751,7 @@ def test_pretooluse_submits_a_posix_relative_path(monkeypatch: pytest.MonkeyPatc
     }
     result = _invoke(payload)
     assert result.exit_code == 0, result.output
-    submitted = captured["json"]["changed_paths"]
+    submitted = captured["json"]["paths"]
     assert submitted == ["docs/guide/page.md"]
     assert "\\" not in submitted[0]
 
@@ -680,7 +771,7 @@ def test_stop_event_parses_a_rename_as_its_new_path(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(httpx, "post", fake_post)
     result = _invoke({"hook_event_name": "Stop", "cwd": str(repo)})
     assert result.exit_code == 0, result.output
-    assert captured["json"]["changed_paths"] == ["renamed.txt"]
+    assert captured["json"]["paths"] == ["renamed.txt"]
 
 
 def test_stop_event_does_not_misparse_a_filename_containing_an_arrow(
@@ -705,7 +796,7 @@ def test_stop_event_does_not_misparse_a_filename_containing_an_arrow(
     monkeypatch.setattr(httpx, "post", fake_post)
     result = _invoke({"hook_event_name": "Stop", "cwd": str(repo)})
     assert result.exit_code == 0, result.output
-    assert captured["json"]["changed_paths"] == ["weird -> name.txt"]
+    assert captured["json"]["paths"] == ["weird -> name.txt"]
 
 
 def test_stop_event_reports_a_non_ascii_filename_unescaped(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
@@ -723,7 +814,7 @@ def test_stop_event_reports_a_non_ascii_filename_unescaped(monkeypatch: pytest.M
     monkeypatch.setattr(httpx, "post", fake_post)
     result = _invoke({"hook_event_name": "Stop", "cwd": str(repo)})
     assert result.exit_code == 0, result.output
-    assert captured["json"]["changed_paths"] == ["café.txt"]
+    assert captured["json"]["paths"] == ["café.txt"]
 
 
 def test_stop_event_does_not_block_when_git_status_fails(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
@@ -1797,7 +1888,7 @@ def test_stop_event_bounds_total_judge_time_so_a_required_gate_still_reaches_the
     assert sorted(entry["outcome"] for entry in verdicts) == ["error", "error", "pass"]
     starved = [entry["reasoning"] for entry in verdicts if entry["outcome"] == "error"]
     assert all("budget" in reasoning for reasoning in starved), starved
-    assert captured["json"]["changed_paths"] == ["CHANGELOG.md"]
+    assert captured["json"]["paths"] == ["CHANGELOG.md"]
 
 
 def test_stop_event_with_a_non_utf8_diff_still_blocks_a_required_gate(
@@ -1865,7 +1956,7 @@ def test_stop_event_with_a_non_utf8_diff_still_blocks_a_required_gate(
     # .otari-guardrails.yml itself is untracked here (written after the initial commit,
     # for a self-contained test repo) and so is real, expected changed-path evidence
     # too, alongside the two files this test cares about.
-    assert sorted(captured["json"]["changed_paths"]) == [
+    assert sorted(captured["json"]["paths"]) == [
         ".otari-guardrails.yml",
         "CHANGELOG.md",
         "src/gateway/latin.py",
@@ -2255,7 +2346,7 @@ def test_pretooluse_labels_each_branch_with_the_moment_it_really_is(
             "tool_input": tool_input,
         }
         assert _invoke(payload).exit_code == 0
-        assert captured["json"]["changed_path_source"] == expected, tool_name
+        assert captured["json"]["path_source"] == expected, tool_name
 
 
 def test_stop_event_labels_its_paths_as_the_working_tree(
@@ -2278,7 +2369,7 @@ def test_stop_event_labels_its_paths_as_the_working_tree(
     monkeypatch.setattr(httpx, "post", fake_post)
     payload = {"hook_event_name": "Stop", "cwd": str(repo), "transcript_path": str(transcript)}
     assert _invoke(payload).exit_code == 0
-    assert captured["json"]["changed_path_source"] == "stop.working_tree"
+    assert captured["json"]["path_source"] == "stop.working_tree"
 
 
 def test_a_repeat_stop_block_says_the_block_is_finite(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
@@ -2675,3 +2766,121 @@ def test_collect_check_verdicts_skips_gates_over_the_per_run_limit(tmp_path: Pat
 def test_collect_check_verdicts_returns_empty_for_an_unparseable_policy(tmp_path: Path) -> None:
     gates_file = tmp_path / ".otari-guardrails.yml"
     assert hook_cli._hook_collect_check_verdicts("not: valid: yaml: at: all:", gates_file, tmp_path, []) == []
+
+
+def _read_payload(repo: Path, target: str) -> dict[str, Any]:
+    return {
+        "hook_event_name": "PreToolUse",
+        "cwd": str(repo),
+        "tool_name": "Read",
+        "tool_input": {"file_path": target},
+    }
+
+
+@pytest.mark.parametrize("spelling", ["{repo}/.env", ".env", "./.env"])
+def test_a_symlink_out_of_the_repo_does_not_carry_the_gate_with_it(
+    monkeypatch: pytest.MonkeyPatch, repo: Path, spelling: str
+) -> None:
+    """CWE-59: resolving before matching let the commonest .env layout escape every glob.
+
+    A checkout whose `.env` is a link to a shared or home secrets file is the
+    ordinary arrangement, not an exotic one. Resolving first put the target
+    outside the repo root, `relative_to` raised, and the hook returned without
+    evaluating a single gate, so the rule silently did nothing in exactly the
+    case it was written for. The lexical spelling is submitted beside the
+    resolved one now, and it is the one that matches a glob naming `.env`.
+    """
+    outside = repo.parent / "shared-secrets.env"
+    outside.write_text("OPENAI_API_KEY=sk-leaked\n", encoding="utf-8")
+    (repo / ".env").symlink_to(outside)
+    (repo / ".otari-guardrails.yml").write_text(
+        'schema_version: "1.0"\npolicy:\n  id: x\ngates:\n'
+        "  - id: no-secret-reads\n    type: path\n    runs: [pre_tool_use.read_target]\n"
+        '    enforcement: required\n    forbidden: [".env"]\n    message: no\n',
+        encoding="utf-8",
+    )
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: object) -> _FakeResponse:
+        captured["json"] = kwargs.get("json")
+        return _FakeResponse(
+            {
+                "blocked": True,
+                "results": [
+                    {"gate_id": "no-secret-reads", "enforcement": "required", "outcome": "fail", "message": "no"}
+                ],
+            }
+        )
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    result = _invoke(_read_payload(repo, spelling.format(repo=repo)))
+    assert result.exit_code == 2, result.output
+    assert ".env" in captured["json"]["paths"]
+
+
+def test_an_edit_through_a_symlink_out_of_the_repo_is_checked_too(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
+    """The same hole on the write side, which predates the read source.
+
+    Fixed in the same place rather than left alone: it is one helper, and a
+    `stop.working_tree` backstop does not cover it either, since a write
+    through a link to somewhere outside the repo changes nothing `git status`
+    reports.
+    """
+    outside = repo.parent / "real-changelog.md"
+    outside.write_text("x\n", encoding="utf-8")
+    (repo / "CHANGELOG.md").symlink_to(outside)
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: object) -> _FakeResponse:
+        captured["json"] = kwargs.get("json")
+        return _FakeResponse({"blocked": False, "results": []})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "cwd": str(repo),
+        "tool_name": "Write",
+        "tool_input": {"file_path": str(repo / "CHANGELOG.md"), "content": "x"},
+    }
+    result = _invoke(payload)
+    assert result.exit_code == 0, result.output
+    assert "CHANGELOG.md" in captured["json"]["paths"]
+
+
+def test_an_alias_to_a_secret_is_caught_by_the_resolved_spelling(monkeypatch: pytest.MonkeyPatch, repo: Path) -> None:
+    """The other direction, which the lexical spelling alone cannot see.
+
+    Both candidates are submitted precisely because neither answers on its
+    own: the lexical one answers "what did the policy name", the resolved one
+    answers "what does this actually reach".
+    """
+    (repo / ".env").write_text("SECRET=1\n", encoding="utf-8")
+    (repo / "notes.md").symlink_to(repo / ".env")
+    captured: dict[str, Any] = {}
+
+    def fake_post(url: str, **kwargs: object) -> _FakeResponse:
+        captured["json"] = kwargs.get("json")
+        return _FakeResponse({"blocked": False, "results": []})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    _invoke(_read_payload(repo, str(repo / "notes.md")))
+    assert set(captured["json"]["paths"]) == {"notes.md", ".env"}
+
+
+def test_a_target_outside_the_repo_under_both_spellings_submits_nothing(
+    monkeypatch: pytest.MonkeyPatch, repo: Path
+) -> None:
+    """Neither candidate is nameable by a repo-relative glob, so there is nothing to check."""
+    called = False
+
+    def fake_post(*args: object, **kwargs: object) -> _FakeResponse:
+        nonlocal called
+        called = True
+        return _FakeResponse({"blocked": False, "results": []})
+
+    monkeypatch.setattr(httpx, "post", fake_post)
+    outside = repo.parent / "elsewhere.env"
+    outside.write_text("SECRET=1\n", encoding="utf-8")
+    result = _invoke(_read_payload(repo, str(outside)))
+    assert result.exit_code == 0, result.output
+    assert not called
