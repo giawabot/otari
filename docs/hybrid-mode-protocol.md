@@ -116,7 +116,7 @@ Content-Type: application/json
 Otari iterates `attempts` in order. On a provider failure before a response is
 committed, it moves to the next entry; on success it stops. The `attempt_id` of
 the entry that ultimately succeeded (or the last one tried, on total failure) is what Otari echoes
-back via `X-Correlation-ID` and reports through `/gateway/usage`.
+back via `Otari-Attempt-ID` and reports through `/gateway/usage`.
 
 `extra_params` (optional, omitted for most providers) carries provider-specific
 credential/client fields beyond `api_key`/`api_base`: for example AWS
@@ -157,7 +157,7 @@ boto3 client and AWS has two distinct credential shapes:
 
 `request_id` groups every `attempt_id` from the same resolve call so the
 platform can attribute spend, render trace timelines, and emit fallback events.
-Otari also surfaces it as the `X-Otari-Request-ID` response header.
+Otari also surfaces it as the `Otari-Request-ID` response header.
 
 `fallback_enabled` is informational, set by the platform when its routing
 policy actually allows fallback (i.e. the policy has multiple enabled entries

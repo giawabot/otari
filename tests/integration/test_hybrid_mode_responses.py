@@ -161,8 +161,8 @@ def test_hybrid_mode_sets_correlation_id_and_reports_usage(
     )
 
     assert response.status_code == 200, response.text
-    assert response.headers["X-Correlation-ID"] == attempt_id
-    assert response.headers["X-Otari-Request-ID"] == "req-1"
+    assert response.headers["Otari-Attempt-ID"] == attempt_id
+    assert response.headers["Otari-Request-ID"] == "req-1"
     assert response.json()["usage"]["cost_usd"] == "0.012345"
     assert response.json()["usage"]["pricing_source"] == "managed"
     assert usage_reports == [
@@ -401,7 +401,7 @@ def test_hybrid_mode_falls_through_on_first_attempt_failure(
     )
 
     assert response.status_code == 200, response.text
-    assert response.headers["X-Correlation-ID"] == "att-fallback"
+    assert response.headers["Otari-Attempt-ID"] == "att-fallback"
     assert len(calls) == 2
     outcomes = [report["status"] for report in usage_reports]
     assert "error" in outcomes
@@ -599,7 +599,7 @@ def test_hybrid_mode_tool_loop_falls_through_pre_lock_in(
     )
 
     assert response.status_code == 200, response.text
-    assert response.headers["X-Correlation-ID"] == "tool-att-fallback"
+    assert response.headers["Otari-Attempt-ID"] == "tool-att-fallback"
     assert len(calls) == 2
     error_reports = [r for r in usage_reports if r.get("status") == "error"]
     assert len(error_reports) == 1
@@ -753,8 +753,8 @@ def test_hybrid_mode_tool_loop_streaming_sets_correlation_id_and_reports_usage(
             headers={"Authorization": "Bearer user_test_token"},
         ) as response:
             assert response.status_code == 200, response.read().decode()
-            assert response.headers["X-Correlation-ID"] == attempt_id
-            assert response.headers["X-Otari-Request-ID"] == "req-1"
+            assert response.headers["Otari-Attempt-ID"] == attempt_id
+            assert response.headers["Otari-Request-ID"] == "req-1"
             wire = response.read().decode()
 
     assert '"cost_usd":"0.012345"' in wire
@@ -897,8 +897,8 @@ def test_hybrid_mode_tool_loop_streaming_falls_through_pre_lock_in(
     )
 
     assert response.status_code == 200, response.text
-    assert response.headers["X-Correlation-ID"] == "tool-att-fallback"
-    assert response.headers["X-Otari-Request-ID"] == "tool-stream-req-1"
+    assert response.headers["Otari-Attempt-ID"] == "tool-att-fallback"
+    assert response.headers["Otari-Request-ID"] == "tool-stream-req-1"
     assert "response.completed" in response.text
     # Both attempts were tried in order: the tool-loop gate is gone.
     assert calls == ["sk-openai-broken", "sk-openai-real"]
