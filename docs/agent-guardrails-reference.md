@@ -829,6 +829,34 @@ The turn is blocked when a `required` gate's outcome is anything but `pass` or
 never block, since its `enforcement` is always `advisory`; a `verifier` gate
 can, since its may be `required`.
 
+### Who hears an advisory finding
+
+A blocked turn reaches the agent: `otari hook` exits 2, and the harness feeds
+its stderr to the model, which is how a `required` gate gets the change
+reverted rather than merely noted. Exit 0 has no such channel, so an advisory
+finding is written to `systemMessage`, which the harness shows the person.
+
+A `judge` gate is the exception, and takes both. It may never be `required`,
+so exit 2 is a channel it cannot reach by any configuration; left at
+`systemMessage` alone, a model's reading of the turn would be visible to
+everyone except the agent that could act on it, which is the reason a rubric
+is written. Its finding is therefore also sent as the `Stop` event's
+`additionalContext`, which lands in the transcript for the model to see on the
+next turn without blocking this one. The gate's `message` and the judge's own
+`reasoning` both travel, since which line the model objected to is what makes
+the finding actionable.
+
+Only a `fail` crosses over. A judge gate reporting `error`, `not_run` or
+`unknown` evaluated no rubric, so forwarding it would describe a finding that
+was never made, and a judge that could not run is the operator's problem
+rather than the turn's. Those still reach the person on `systemMessage`, like
+any other gate that could not resolve.
+
+A deterministic gate whose author wrote `advisory` keeps `systemMessage`
+alone. That author could have written `required` and chose not to, so the
+quieter channel is the one they asked for; a `judge` author was never offered
+the choice.
+
 ## How the harness integrations collect evidence
 
 `otari hook` reads the harness's hook payload on stdin and collects the evidence
