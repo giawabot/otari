@@ -445,17 +445,33 @@ UNPRICED_TOOL_DETAIL_TEMPLATE = (
 
 
 class ErrorKind(Enum):
-    """Coarse error category an adapter maps onto its wire envelope.
+    """Coarse error category, for a dialect that names one on the wire.
 
-    The chat and responses formats raise plain ``HTTPException`` and ignore
-    the kind; the Anthropic messages format maps it to the ``error.type``
-    field of its error body.
+    The set covers every category a dialect distinguishes, so an error can say what it is.
     """
 
-    INVALID_REQUEST = auto()
     API = auto()
+    AUTHENTICATION = auto()
+    INVALID_REQUEST = auto()
+    NOT_FOUND = auto()
     PERMISSION = auto()
     RATE_LIMIT = auto()
+
+
+# An error flattened into an ``HTTPException`` no longer carries its kind, so a
+# status stands in for one here.
+_STATUS_ERROR_KINDS = {
+    status.HTTP_400_BAD_REQUEST: ErrorKind.INVALID_REQUEST,
+    status.HTTP_401_UNAUTHORIZED: ErrorKind.AUTHENTICATION,
+    status.HTTP_403_FORBIDDEN: ErrorKind.PERMISSION,
+    status.HTTP_404_NOT_FOUND: ErrorKind.NOT_FOUND,
+    status.HTTP_429_TOO_MANY_REQUESTS: ErrorKind.RATE_LIMIT,
+}
+
+
+def error_kind_for_status(status_code: int) -> ErrorKind:
+    """The kind a bare status implies, falling back to ``API``."""
+    return _STATUS_ERROR_KINDS.get(status_code, ErrorKind.API)
 
 
 class ProviderErrorMapping(NamedTuple):
