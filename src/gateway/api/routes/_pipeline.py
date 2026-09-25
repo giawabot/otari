@@ -64,7 +64,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gateway.api.deps import extract_credential_token, verify_api_key_or_master_key
+from gateway.api.deps import extract_credential_token, get_container, verify_api_key_or_master_key
 from gateway.api.routes._attempts import walk_attempts
 from gateway.api.routes._helpers import apply_input_guardrails, resolve_user_id
 from gateway.api.routes._platform import (
@@ -81,7 +81,6 @@ from gateway.api.routes._platform import (
     _report_platform_usage,
     _resolve_platform_code_execution,
     _resolve_platform_credentials,
-    _resolve_platform_mcp_servers,
     _resolve_platform_web_search,
     is_provider_billing_error,
     record_abandoned_attempt,
@@ -125,7 +124,11 @@ from gateway.core.usage import (
     cache_write_1h_tokens_of,
     cache_write_tokens_of,
 )
-from gateway.exceptions.tools_exceptions import WorkspaceMcpServerNotFoundError, WorkspaceWebSearchDomainsExcludedError
+from gateway.exceptions.tools_exceptions import (
+    McpServerResolutionFailedError,
+    WorkspaceMcpServerNotFoundError,
+    WorkspaceWebSearchDomainsExcludedError,
+)
 from gateway.inflight import track_request
 from gateway.log_config import logger
 from gateway.metrics import REGISTRY, Histogram
@@ -139,6 +142,7 @@ from gateway.models.pricing import ModelPricing, PriceSource
 from gateway.models.tools import CodeExecutor
 from gateway.models.usage import UsageLog
 from gateway.ports.code_execution_port import CodeExecutionPort
+from gateway.ports.mcp_server_port import McpServerPort, McpServerScope
 from gateway.ports.model_provider_port import HostedAccessDeniedError, ModelProviderPort
 from gateway.rate_limit import RateLimitInfo, check_rate_limit
 from gateway.services.budgets import (
@@ -211,7 +215,6 @@ from gateway.services.tenancy.workspace_code_execution_policy_service import (
     ResolvedCodeExecutionPolicy,
     resolve_workspace_code_execution_policy,
 )
-from gateway.services.tenancy.workspace_mcp_server_service import resolve_workspace_mcp_servers
 from gateway.services.tenancy.workspace_web_search_service import (
     MAX_WEB_SEARCH_DOMAINS,
     InvalidStoredWebSearchDomainError,
@@ -929,6 +932,7 @@ class RequestContext:
         reservation: ReservationHandle | None,
         started_at: float,
         workspace_id: uuid.UUID | None = None,
+        mcp_servers: McpServerPort | None = None,
         resolved_provider: ResolvedProvider | None = None,
         plan: CompiledPlan | None = None,
         estimate_inputs: "EstimateInputs | None" = None,
@@ -966,6 +970,7 @@ class RequestContext:
         # so a request whose gate-check selector was unparseable still gets
         # organization-scoped provider keys on its real dispatch attempt.
         self.workspace_id = workspace_id
+        self.mcp_servers = mcp_servers
         self.rate_limit_info = rate_limit_info
         self.reservation = reservation
         # USD already written onto a failure row for gateway-run tool calls. A
@@ -1770,6 +1775,9 @@ async def resolve_request_context(
     # Earliest point in the shared handler preamble; anchors the request's
     # latency_ms (measured monotonically, so it is immune to wall-clock steps).
     started_at = time.monotonic()
+    # Before the reservation, so a container that cannot answer refuses without
+    # leaving a hold behind.
+    mcp_servers = get_container(raw_request).resolve(McpServerPort, db)
     hybrid_mode = config.is_hybrid_mode
     route: ResolvedRoute | None = None
     user_token: str | None = None
@@ -2217,6 +2225,7 @@ async def resolve_request_context(
         reservation=reservation,
         started_at=started_at,
         workspace_id=workspace_id,
+        mcp_servers=mcp_servers,
         resolved_provider=resolved_provider,
         plan=plan,
         estimate_inputs=estimate_inputs,
@@ -2718,30 +2727,21 @@ async def _resolve_mcp_server_ids(
 ) -> list[McpServerConfig]:
     """Swap a request's ``mcp_server_ids`` for the configs they name.
 
-    One field, two sources, chosen by mode.
-    A hybrid gateway asks the control plane, which owns the workspace's stored servers there.
-    A standalone one reads its own rows for the workspace the request's key belongs to.
-    That workspace comes off the key at authentication and never off a header.
+    The port answers from wherever this deployment keeps them.
+    The workspace comes off the key at authentication and never off a header.
 
-    Both modes refuse an unknown id with a 404 and the same error type, so a caller moving
-    between them sees one contract.
-    A standalone request with no database session or no resolved workspace cannot resolve
-    anything, and is refused rather than served with the ids silently dropped.
+    Every deployment refuses an unknown id with a 404, so the status a caller
+    sees does not change with the deployment it reached.
     """
-    if ctx.hybrid_mode:
-        assert ctx.user_token is not None  # guaranteed by the hybrid-mode preamble
-        return await _resolve_platform_mcp_servers(
-            config=ctx.config,
-            user_token=ctx.user_token,
-            mcp_server_ids=mcp_server_ids,
-        )
-
-    if ctx.db is None or ctx.workspace_id is None:
+    if ctx.mcp_servers is None:
         raise adapter.error(400, MCP_SERVER_IDS_UNAVAILABLE_DETAIL, ErrorKind.INVALID_REQUEST)
+    scope = McpServerScope(workspace_id=ctx.workspace_id, user_token=ctx.user_token)
     try:
-        return await resolve_workspace_mcp_servers(ctx.db, workspace_id=ctx.workspace_id, server_ids=mcp_server_ids)
+        return await ctx.mcp_servers.resolve_many(scope, mcp_server_ids)
     except WorkspaceMcpServerNotFoundError as exc:
         raise adapter.error(404, exc.message, ErrorKind.NOT_FOUND) from exc
+    except McpServerResolutionFailedError as exc:
+        raise adapter.error(exc.status_code, exc.message, ErrorKind.API) from exc
     except (SecretBoxUnavailableError, SecretDecryptionError) as exc:
         # The operator's problem, not the caller's, and the underlying message
         # names the environment variable, so it stays in the log.
@@ -2945,14 +2945,10 @@ async def prepare_gateway_tools(
                 adapter, stored_servers, stored=True, workspace_id=ctx.workspace_id
             )
             stored_name_counts = Counter(server.name for server in stored_servers)
-            # Standalone cannot reach this: `uq_workspace_mcp_servers_workspace_name`
-            # makes stored names unique per workspace and `resolve_workspace_mcp_servers`
-            # de-duplicates the ids. Hybrid can, because `_resolve_platform_mcp_servers`
-            # returns the platform's payload verbatim, so that uniqueness is a remote
-            # promise rather than a local invariant. It answers the way an unsafe stored
-            # URL does, since a stored duplicate is workspace configuration the caller
-            # can neither see nor fix: a fixed 500 detail, with the names and the
-            # workspace in the log.
+            # Only a peer's answer can hold a duplicate name, because a unique
+            # index and de-duplicated ids rule one out locally. It is workspace
+            # configuration the caller cannot fix, so the detail is fixed and the
+            # names go to the log.
             if len(stored_name_counts) != len(stored_servers):
                 logger.error(
                     "Stored MCP servers do not have unique names for workspace %s: %s",
