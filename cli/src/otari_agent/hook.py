@@ -12,6 +12,7 @@ import re
 import shlex
 import shutil
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -1748,20 +1749,22 @@ class _VerifierScope(NamedTuple):
     """Where a verifier gate's script path resolves, and the directory the script must stay inside.
 
     `base_label` and `boundary_label` are the display forms of the two paths.
+    `origin` is who owns the gate, which decides whether a symlink may lead out of `boundary`.
     """
 
     base: Path
     boundary: Path
     base_label: str
     boundary_label: str
+    origin: GuardrailOrigin
 
 
 def _verifier_scope(repo_root: Path, origin: GuardrailOrigin) -> _VerifierScope:
     """The scope of a verifier script: the repo root for a repo gate, `~/.otari/verifiers/` for a user-level gate."""
     if origin is GuardrailOrigin.USER:
         home = Path.home()
-        return _VerifierScope(home, home / USER_VERIFIER_DIR, "~/", f"~/{USER_VERIFIER_DIR}/")
-    return _VerifierScope(repo_root, repo_root, "", "the repo root")
+        return _VerifierScope(home, home / USER_VERIFIER_DIR, "~/", f"~/{USER_VERIFIER_DIR}/", origin)
+    return _VerifierScope(repo_root, repo_root, "", "the repo root", origin)
 
 
 def _verifier_scopes(origins: Mapping[str, GuardrailOrigin], guardrail_root: Path) -> dict[str, _VerifierScope]:
@@ -1769,10 +1772,59 @@ def _verifier_scopes(origins: Mapping[str, GuardrailOrigin], guardrail_root: Pat
     return {gate_id: _verifier_scope(guardrail_root, origin) for gate_id, origin in origins.items()}
 
 
-def _resolve_verifier(scope: _VerifierScope, verifier: str) -> Path | None:
-    """The script `verifier` names, or None when it resolves outside the scope's boundary."""
+# NOTE: Without POSIX file ownership (Windows), a user-level verifier's target must stay inside its boundary.
+_HAS_FILE_OWNERS = hasattr(os, "getuid")
+
+
+class _VerifierRefusedError(Exception):
+    """A verifier script that its scope's rules refuse to run."""
+
+
+def _outside_boundary(scope: _VerifierScope, verifier: str) -> _VerifierRefusedError:
+    return _VerifierRefusedError(f"verifier {verifier!r} resolves outside {scope.boundary_label}")
+
+
+def _resolve_verifier(scope: _VerifierScope, verifier: str) -> Path:
+    """Return the script `verifier` names, or raise `_VerifierRefusedError` when the scope refuses it.
+
+    A repo gate's script must resolve inside the repo, because a cloned repo is less trusted than its user.
+    A user-level gate's path must stay inside `~/.otari/verifiers/` before any symlink is followed.
+    This lets the user link a script in from a dotfiles checkout.
+    The target must be a regular file that the user owns and that group and others cannot write.
+    """
+    if scope.origin is GuardrailOrigin.USER:
+        return _resolve_user_verifier(scope, verifier)
     script_path = (scope.base / verifier).resolve()
-    return script_path if script_path.is_relative_to(scope.boundary.resolve()) else None
+    if not script_path.is_relative_to(scope.boundary.resolve()):
+        raise _outside_boundary(scope, verifier)
+    return script_path
+
+
+def _resolve_user_verifier(scope: _VerifierScope, verifier: str) -> Path:
+    boundary = Path(os.path.normpath(scope.boundary))
+    path = Path(os.path.normpath(scope.base / verifier))
+    if not path.is_relative_to(boundary):
+        raise _outside_boundary(scope, verifier)
+    target = path.resolve()
+    subject = f"verifier {verifier!r}" if target == path else f"verifier {verifier!r} resolves to {target}, which"
+    if not _HAS_FILE_OWNERS and not target.is_relative_to(boundary.resolve()):
+        raise _VerifierRefusedError(f"{subject} is outside {scope.boundary_label}")
+    try:
+        status = target.stat()
+    except FileNotFoundError:
+        raise _VerifierRefusedError(f"{subject} does not exist") from None
+    except OSError as exc:
+        raise _VerifierRefusedError(f"{subject} cannot be checked: {exc.strerror or exc}") from exc
+    if not stat.S_ISREG(status.st_mode):
+        raise _VerifierRefusedError(f"{subject} is not a regular file")
+    if not _HAS_FILE_OWNERS:
+        return target
+    # NOTE: Only the target file is checked, not the directories above it.
+    if status.st_uid != os.getuid():
+        raise _VerifierRefusedError(f"{subject} is owned by another user")
+    if status.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise _VerifierRefusedError(f"{subject} is writable by group or others")
+    return target
 
 
 def _hook_run_check_verifier(
@@ -1786,14 +1838,8 @@ def _hook_run_check_verifier(
     what lets `enforcement: required` genuinely block for this gate type,
     unlike `judge`: the contract is reproducible, not a model's opinion.
 
-    `verifier` is resolved against `scope.base` and, before it is ever run,
-    confirmed to still resolve inside `scope.boundary` (mirrors the same guard the
-    PreToolUse edit-path branch above applies to its own target path): a
-    policy naming `../../etc/passwd` or an absolute path domain.policy
-    already rejects at parse time, but a relative path can still climb out
-    with enough `..` segments, and running whatever that resolves to would
-    be a materially different, undocumented capability, not "run a
-    repo-local script".
+    Before it runs, `verifier` is resolved against `scope.base` and checked by `_resolve_verifier`.
+    The policy parser rejects an absolute path, but a relative path can still climb out with enough `..` segments.
     The scope can lie outside `repo_root`, as a user-level gate's `~/.otari/verifiers/` does.
 
     No sandboxing beyond that check, and no guard requiring the script to
@@ -1826,9 +1872,10 @@ def _hook_run_check_verifier(
     if remaining <= 0:
         return "error", "check time budget exhausted before this verifier could run"
 
-    script_path = _resolve_verifier(scope, verifier)
-    if script_path is None:
-        return "error", f"verifier {verifier!r} resolves outside {scope.boundary_label}"
+    try:
+        script_path = _resolve_verifier(scope, verifier)
+    except _VerifierRefusedError as exc:
+        return "error", str(exc)
 
     if not script_path.is_file():
         return "error", f"verifier {verifier!r} does not exist"
@@ -3351,9 +3398,10 @@ def _guardrails_probe_verifier(repo_root: Path, verifier: str, origin: Guardrail
     required gate, and an author would rather hear it here.
     """
     scope = _verifier_scope(repo_root, origin)
-    script_path = _resolve_verifier(scope, verifier)
-    if script_path is None:
-        return f"verifier {verifier!r} resolves outside {scope.boundary_label}, so the hook refuses to run it."
+    try:
+        script_path = _resolve_verifier(scope, verifier)
+    except _VerifierRefusedError as exc:
+        return f"{exc}, so the hook refuses to run it."
     if not script_path.is_file():
         return f"verifier {verifier!r} does not exist."
     if not os.access(script_path, os.X_OK):
