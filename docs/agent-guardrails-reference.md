@@ -80,6 +80,21 @@ and declaring `priority` on one is an error rather than a no-op.
     message: Narration belongs in the commit message.
 ```
 
+### `accept_warnings`, on any gate
+
+Some `otari guardrails validate` warnings describe a design that is intended. A gate may name the codes of those warnings in an optional `accept_warnings` list. `validate` then prints each such warning as `accepted`, and `--strict` does not count it. See [Checking a guardrail before it runs](#checking-a-guardrail-before-it-runs) for the codes.
+
+```yaml
+  - id: no-agent-edited-policy
+    type: path
+    runs: [pre_tool_use.edit_target]   # a verifier covers the Stop half
+    enforcement: required
+    forbidden: [".otari/**"]
+    accept_warnings: [shell-write-unseen]
+```
+
+An acceptance covers every warning of that kind on the gate, not one glob or phrase. An unknown code is an error, and so is a code that the gate's type can never draw. A code that this gate does not draw now is not reported. The `judge-gate-cap` and `verifier-gate-cap` warnings are about the guardrail as a whole: each is accepted only when every gate it names as skipped accepts it. Which gates are skipped follows the cap, `priority` and then declaration order, so a lower `--max-judges`, a new gate or a changed priority can skip a gate that does not accept the warning. Name the cap code on every gate of that type to keep the acceptance stable. A gate inside the cap runs, so the code has no effect there.
+
 ## Composing several files
 
 These are about a guardrail made of several files. A single `guardrails.yml`
@@ -247,7 +262,7 @@ Three things this does not cover, all of them deliberate:
   Its reads go through the shell, where they are `pre_tool_use.command`
   evidence like everything else.
 
-`otari guardrails validate` warns about the second of those until some
+`otari guardrails validate` warns about the second of those (`shell-read-unseen`) until some
 `command` gate's own forbidden phrase names a path these globs match, which
 is the one mechanically checkable form of "the shell was considered here". It
 is not a coverage proof, and cannot be: the measured table below shows a
@@ -1186,30 +1201,31 @@ more are added that a parser does not see:
   this repo's own guardrail.
 
 A **warning** is a gate that parses, runs, and may not mean what its author
-intended:
+intended. Each kind has a stable code, which `validate` prints beside it:
 
-- A `**` glob whose shallower depth nothing else in the same field covers.
+- `glob-misses-shallower-depth`: a `**` glob whose shallower depth nothing else in the same field covers.
   `**` must consume at least one path segment, so `**/CLAUDE.md` reaches
   `web/CLAUDE.md` and never the root file, and `src/**/conftest.py` never
   reaches `src/conftest.py`. Coverage, not an identical twin string: a list
   of `["*.md", "**/CLAUDE.md"]` already reaches the root file through `*.md`
   and is left alone. A trailing `**` is not warned about either, since its
   twin would name a bare directory, which Git never reports as a changed path.
-- A glob containing a backslash, which is a warning rather than an error
+- `backslash-in-glob`: a glob containing a backslash, which is a warning rather than an error
   because a POSIX filename may legally contain one; globs are matched against
   repo-relative POSIX paths split on `/`.
-- A single-token `forbidden` phrase on a `command` gate. A phrase matches a
+- `single-token-phrase`: a single-token `forbidden` phrase on a `command` gate. A phrase matches a
   token run in any position, so `npm` also refuses `grep -rn npm web/`. A
   single-token `require` phrase on a `command_if_changed` gate is left alone:
   over-matching there accepts a session sooner rather than refusing real work,
   and it is usually what the author wants, since a required command can be
   spelled several ways.
-- A `path` gate that runs only at `pre_tool_use.edit_target`. It sees the path
+- `shell-write-unseen`: a `path` gate that runs at `pre_tool_use.edit_target` without `stop.working_tree`. It sees the path
   an edit tool declares and nothing a shell command writes (a redirect,
   `sed -i`, a heredoc, `cp`, a script). Adding `stop.working_tree` is the
   backstop. A gate that runs only at `stop.working_tree` is not warned about:
   after the fact, but complete over the tree.
-- More `judge` or `verifier` gates than one `Stop` event evaluates (the
+- `shell-read-unseen`: a `path` gate that runs at `pre_tool_use.read_target` while no `command` gate names any of its paths. It sees the `Read` tool and nothing a shell command reads, and nothing catches a shell read afterwards. See [Refusing a read](#refusing-a-read) above.
+- `judge-gate-cap` and `verifier-gate-cap`: more `judge` or `verifier` gates than one `Stop` event evaluates (the
   `--max-judges` value, five by default, and twenty respectively), naming
   which ones fall past the cap. Both caps apply after `when_changed` filtering,
   so this is the worst case: a session where every one of them applies at once. This is the check a composed guardrail
@@ -1218,6 +1234,7 @@ intended:
 
 None of these blocks on its own, because each has a legitimate exception.
 `--strict` makes a warning non-zero too, which is what a CI invocation wants.
+A gate whose design a warning describes accepts it with [`accept_warnings`](#accept_warnings-on-any-gate), and `--strict` then does not count it.
 
 `--command` and `--path` (both repeatable) answer the other question,
 "does it say what I think it says". Each is evaluated at every moment a real
