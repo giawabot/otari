@@ -426,7 +426,6 @@ SERVICE_DATABASE_IMPORT_BASELINE = (
     "gateway/services/tenancy/user_service.py",
     "gateway/services/tenancy/webauthn_service.py",
     "gateway/services/tenancy/workspace_activation_service.py",
-    "gateway/services/tenancy/workspace_code_execution_policy_service.py",
     "gateway/services/tenancy/workspace_mcp_server_service.py",
     "gateway/services/tenancy/workspace_service.py",
     "gateway/services/tenancy/workspace_web_search_service.py",
@@ -732,10 +731,7 @@ MODE_READS = ("configured_mode", "effective_mode", "is_hosted_mode", "is_hybrid_
 MODE_FUNCTION = "deployment_for"
 # The services that still read the deployment's mode.
 # An entry that stops reading it fails the check until it is removed, so the list only shrinks.
-SERVICE_MODE_READ_BASELINE = (
-    "gateway/services/playground_service.py",
-    "gateway/services/provider_kwargs.py",
-)
+SERVICE_MODE_READ_BASELINE = ("gateway/services/provider_kwargs.py",)
 
 
 def _mode_reads(tree: ast.Module) -> list[tuple[int, str]]:
@@ -796,13 +792,7 @@ FIELD_DEFAULT_KEYWORDS = ("default", "default_factory")
 # The path is the dotted chain of enclosing class and function names, not Python's __qualname__.
 # An entry whose default is gone fails the check until it is removed, so the list only shrinks.
 LISTENER_DEFAULT_BASELINE: tuple[tuple[str, str, str], ...] = (
-    ("gateway/container.py", "_identity_provider_adapter_factory", "workspace_listener"),
     ("gateway/container.py", "build_container", "membership_listener"),
-    ("gateway/container.py", "build_container", "workspace_listener"),
-    ("gateway/services/tenancy/organization_service.py", "OrganizationService.__init__", "workspace_listener"),
-    ("gateway/services/tenancy/provisioning_service.py", "ensure_bootstrap_identity", "workspace_listener"),
-    ("gateway/services/tenancy/user_service.py", "create_user_for_signup", "workspace_listener"),
-    ("gateway/services/tenancy/workspace_service.py", "WorkspaceService.__init__", "workspace_listener"),
 )
 
 
@@ -1140,7 +1130,6 @@ DOMAIN_NAME_BASELINE: dict[str, tuple[str, ...]] = {
         "verification_email.py",
         "webauthn_service.py",
         "workspace_activation_service.py",
-        "workspace_code_execution_policy_service.py",
         "workspace_listener.py",
         "workspace_mcp_server_service.py",
         "workspace_service.py",

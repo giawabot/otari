@@ -63,7 +63,12 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gateway.api.deps import ToolPorts, extract_credential_token, get_budget_service, verify_api_key_or_master_key
+from gateway.api.deps import (
+    ToolPorts,
+    extract_credential_token,
+    get_budget_service,
+    verify_api_key_or_master_key,
+)
 from gateway.api.routes._attempts import AdmitAttempt, CandidateCannotServe, PrepareKwargs, walk_attempts
 from gateway.api.routes._helpers import apply_input_guardrails, resolve_user_id
 from gateway.api.routes._idempotency import (
@@ -244,7 +249,6 @@ from gateway.services.tenancy.organization_guardrail_service import (
     ResolvedOrganizationGuardrail,
     resolve_organization_guardrails,
 )
-from gateway.services.tenancy.workspace_code_execution_policy_service import resolve_workspace_code_execution_policy
 from gateway.services.tool_usage import (
     MAX_TOOL_NAMES,
     OVERFLOW_TOOL_NAME,
@@ -1854,6 +1858,7 @@ async def resolve_request_context(
     estimate_max_output_tokens: int | None,
     master_key_user_required_detail: str,
     user_forbidden_detail: str,
+    code_execution_policies: CodeExecutionPolicyPort,
     estimate_cache_write_ttl: Literal["5m", "1h"] | None = None,
     session_principal: SessionPrincipal | None = None,
     routing_signal: Callable[[], RoutingSignal] | None = None,
@@ -2301,7 +2306,9 @@ async def resolve_request_context(
         # already reserved, so a read that fails releases it before propagating.
         if workspace_id is not None and config.sandbox_configured() and declares_code_execution(tools):
             try:
-                code_execution_policy = await resolve_workspace_code_execution_policy(db, workspace_id)
+                code_execution_policy = await code_execution_policies.resolve(
+                    CodeExecutionPolicyScope(workspace_id=workspace_id, user_token=None)
+                )
             except Exception:
                 await refund_reservation(db, reservation)
                 raise
