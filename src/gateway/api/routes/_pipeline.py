@@ -947,6 +947,7 @@ class RequestContext:
         request_id: str | None = None,
         rate_limit_grant: RateLimitGrant | None = None,
         end_user_budget_id: str | None = None,
+        tags: dict[str, str] | None = None,
     ) -> None:
         self.config = config
         # Sent to the client as ``Otari-Request-ID``: the platform's id in hybrid
@@ -970,6 +971,9 @@ class RequestContext:
         # pay that per candidate.
         self.organization_id = organization_id
         self.user_id = user_id
+        # The caller's request tags, written onto every usage row the request
+        # writes once this context exists.
+        self.tags = tags
         # Standalone-only, `None` in hybrid mode: the workspace this request
         # bills to, resolved once in the preamble (`resolve_workspace_id`) and
         # reused here for the rare fallback resolve in `resolve_dispatch_provider`,
@@ -1142,6 +1146,7 @@ async def resolve_dispatch_provider(
             status_code=status.HTTP_400_BAD_REQUEST,
             started_at=ctx.started_at,
             request_id=ctx.request_id,
+            tags=ctx.tags,
         )
         _raise_for_unresolvable_model(model_selector, exc)
     return await _prepare_for_dispatch(ctx, resolved, adapter=adapter, port=model_provider)
@@ -1295,6 +1300,7 @@ async def _serve_from_hosted_credential(
             status_code=status.HTTP_403_FORBIDDEN,
             started_at=ctx.started_at,
             request_id=ctx.request_id,
+            tags=ctx.tags,
         )
         raise adapter.error(403, denied_detail, ErrorKind.PERMISSION) from exc
     except Exception as exc:
@@ -1332,6 +1338,7 @@ async def _serve_from_hosted_credential(
             status_code=status.HTTP_502_BAD_GATEWAY,
             started_at=ctx.started_at,
             request_id=ctx.request_id,
+            tags=ctx.tags,
         )
         # The same detail the unusable-``response_provider`` branch below returns:
         # from the caller's side both are "this build could not put an upstream
@@ -1372,6 +1379,7 @@ async def _serve_from_hosted_credential(
             status_code=status.HTTP_502_BAD_GATEWAY,
             started_at=ctx.started_at,
             request_id=ctx.request_id,
+            tags=ctx.tags,
         )
         raise adapter.error(502, HOSTED_CREDENTIAL_UNUSABLE_DETAIL, ErrorKind.API) from exc
 
@@ -1411,6 +1419,7 @@ async def _bill_vision_side_call(
     usage: CompletionUsage,
     counts_toward_budget: bool = True,
     request_id: str | None = None,
+    tags: dict[str, str] | None = None,
 ) -> None:
     """Meter and bill a vision describe side-call made during normalization.
 
@@ -1447,6 +1456,7 @@ async def _bill_vision_side_call(
         usage_override=usage,
         counts_toward_budget=counts_toward_budget,
         request_id=request_id,
+        tags=tags,
     )
     # Commit the spend directly via an unreserved handle (no held estimate to
     # release): this just adds the actual cost to users.spend. When the request is
@@ -1616,6 +1626,7 @@ async def _compile_request_plan(
     routing_signal: Callable[[], RoutingSignal] | None = None,
     workspace_id: uuid.UUID | None = None,
     request_id: str | None = None,
+    tags: dict[str, str] | None = None,
 ) -> CompiledPlan | None:
     """Compile ``model`` into a plan when it names a routing policy, else ``None``.
 
@@ -1685,6 +1696,7 @@ async def _compile_request_plan(
             status_code=exc.status_code,
             started_at=started_at,
             request_id=request_id,
+            tags=tags,
         )
         raise adapter.error(exc.status_code, exc.caller_detail, ErrorKind.PERMISSION) from exc
 
@@ -1717,6 +1729,7 @@ async def _resolve_keyed_user_id(
     user_forbidden_detail: str,
     started_at: float,
     request_id: str | None = None,
+    tags: dict[str, str] | None = None,
 ) -> tuple[str, str | None]:
     """The billed user for a key- or master-key-authenticated request, and the budget of an end user it named.
 
@@ -1782,6 +1795,7 @@ async def _resolve_keyed_user_id(
                 status_code=exc.status_code,
                 started_at=started_at,
                 request_id=request_id,
+                tags=tags,
             )
         raise
     return user_id, None
@@ -1848,6 +1862,7 @@ async def resolve_request_context(
     normalize_messages: Callable[[NormalizationTarget], Awaitable[tuple[int, CompletionUsage | None]]] | None = None,
     tools: list[dict[str, Any]] | None = None,
     idempotency: IdempotencyGuard | None = None,
+    tags: dict[str, str] | None = None,
 ) -> RequestContext:
     """Run the shared handler preamble up to (and including) budget pre-debit.
 
@@ -1996,6 +2011,7 @@ async def resolve_request_context(
                 user_forbidden_detail=user_forbidden_detail,
                 started_at=started_at,
                 request_id=request_id,
+                tags=tags,
             )
             if end_user_budget_id is not None:
                 response.headers[END_USER_BUDGET_HEADER] = end_user_budget_id
@@ -2032,6 +2048,7 @@ async def resolve_request_context(
             routing_signal=routing_signal,
             workspace_id=workspace_id,
             request_id=request_id,
+            tags=tags,
         )
         if plan is not None:
             head = plan.head
@@ -2080,6 +2097,7 @@ async def resolve_request_context(
                 status_code=status.HTTP_403_FORBIDDEN,
                 started_at=started_at,
                 request_id=request_id,
+                tags=tags,
             )
             raise adapter.error(403, not_allowed_detail, ErrorKind.PERMISSION, headers=error_headers(MODEL_NOT_ALLOWED))
 
@@ -2112,6 +2130,7 @@ async def resolve_request_context(
                     status_code=status.HTTP_403_FORBIDDEN,
                     started_at=started_at,
                     request_id=request_id,
+                    tags=tags,
                 )
                 raise adapter.error(
                     403, not_allowed_detail, ErrorKind.PERMISSION, headers=error_headers(MODEL_NOT_ALLOWED)
@@ -2135,6 +2154,7 @@ async def resolve_request_context(
                         status_code=exc.status_code,
                         started_at=started_at,
                         request_id=request_id,
+                        tags=tags,
                     )
                 raise
 
@@ -2235,6 +2255,7 @@ async def resolve_request_context(
                     status_code=exc.status_code,
                     started_at=started_at,
                     request_id=request_id,
+                    tags=tags,
                 )
             raise
         # require_pricing is a budget-enforcement safety gate: it refuses a request
@@ -2258,6 +2279,7 @@ async def resolve_request_context(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 started_at=started_at,
                 request_id=request_id,
+                tags=tags,
             )
             raise adapter.error(
                 402,
@@ -2324,6 +2346,7 @@ async def resolve_request_context(
                         usage=vision_usage,
                         counts_toward_budget=not budget_exempt,
                         request_id=request_id,
+                        tags=tags,
                     )
                 # Attachments expanded the payload, so the stored inputs must
                 # follow or a later fallover would reprice against the pre-
@@ -2413,6 +2436,7 @@ async def resolve_request_context(
         organization_id=organization_id,
         request_id=request_id,
         end_user_budget_id=end_user_budget_id,
+        tags=tags,
     )
 
 
@@ -3268,6 +3292,7 @@ async def _require_tool_pricing(
                 status_code=status.HTTP_402_PAYMENT_REQUIRED,
                 started_at=ctx.started_at,
                 request_id=ctx.request_id,
+                tags=ctx.tags,
             )
             # Same kind the model gate uses for its own 402, so both no-pricing
             # rejections map to one wire shape per format.
@@ -3393,6 +3418,7 @@ async def record_usage(
     tool_tally: ToolUsageTally | None = None,
     workspace_id: uuid.UUID | None = None,
     request_id: str | None = None,
+    tags: dict[str, str] | None = None,
 ) -> LoggedUsage:
     """Log API usage to the database and return the computed cost and its source.
 
@@ -3449,6 +3475,7 @@ async def record_usage(
         request_id: The ``Otari-Request-ID`` the caller was sent, stored as the
             row's ``request_group_id`` when ``attribution`` carries none, so every
             row a request writes is findable by the id the caller holds.
+        tags: The caller's request tags (``RequestContext.tags``), stored as-is.
 
     Returns:
         The computed cost for this request, or None when usage/pricing is absent,
@@ -3476,6 +3503,7 @@ async def record_usage(
         attempt_position=attribution.position if attribution else None,
         attempt_count=attribution.attempt_count if attribution else None,
         request_group_id=attribution.request_group_id if attribution else request_id,
+        tags=tags,
     )
 
     usage_data = usage_override
@@ -3745,6 +3773,7 @@ async def log_gateway_rejection(
     status_code: int,
     started_at: float | None,
     request_id: str | None = None,
+    tags: dict[str, str] | None = None,
 ) -> None:
     """Record a request the gateway itself refused before any provider was called.
 
@@ -3815,6 +3844,7 @@ async def log_gateway_rejection(
             latency_ms=_elapsed_ms(started_at),
             counts_toward_budget=True,
             request_id=request_id,
+            tags=tags,
         )
     except Exception:
         # Deliberately broad, and deliberately not re-raised: see the docstring.
@@ -3867,6 +3897,7 @@ async def _log_failure_and_refund(
         tool_tally=tool_tally,
         workspace_id=ctx.workspace_id,
         request_id=ctx.request_id,
+        tags=ctx.tags,
     )
     if ctx.reservation is not None:
         if cost:
@@ -4194,6 +4225,7 @@ def build_streaming_response(
     workspace_id: uuid.UUID | None = None,
     extra_headers: dict[str, str] | None = None,
     rate_limit_grant: RateLimitGrant | None = None,
+    tags: dict[str, str] | None = None,
 ) -> StreamingResponse:
     """Wrap an already-opened upstream stream in an SSE response.
 
@@ -4282,6 +4314,7 @@ def build_streaming_response(
             tool_tally=tool_tally,
             workspace_id=workspace_id,
             request_id=request_id,
+            tags=tags,
         )
         if reservation is not None:
             await reconcile_reservation(
@@ -4330,6 +4363,7 @@ def build_streaming_response(
                 tool_tally=tool_tally,
                 workspace_id=workspace_id,
                 request_id=request_id,
+                tags=tags,
             )
             # "Free" is about the tokens the provider never reported, not about
             # tool calls the gateway definitely ran and owes for.
@@ -4359,6 +4393,7 @@ def build_streaming_response(
             tool_tally=tool_tally,
             workspace_id=workspace_id,
             request_id=request_id,
+            tags=tags,
         )
         # The estimate covers the unreported tokens; log_usage adds any tool cost on
         # top of it, so reconcile against the row's total rather than the estimate.
@@ -4410,6 +4445,7 @@ def build_streaming_response(
             tool_tally=tool_tally,
             workspace_id=workspace_id,
             request_id=request_id,
+            tags=tags,
         )
         if reservation is not None:
             # A stream that died after reporting tokens or running searches still
@@ -4452,6 +4488,7 @@ def build_streaming_response(
                 tool_tally=tool_tally,
                 workspace_id=workspace_id,
                 request_id=request_id,
+                tags=tags,
             )
             if abandoned_cost:
                 await reconcile_reservation(
@@ -4769,6 +4806,7 @@ async def run_single_attempt_stream(
         display_model=display_model,
         attribution=stream_attribution,
         tool_tally=tool_ctx.tally,
+        tags=ctx.tags,
     )
 
 
@@ -5279,6 +5317,7 @@ async def log_exhausted_plan(
         attribution=_failure_attribution(ctx, last),
         tool_tally=tool_tally,
         workspace_id=ctx.workspace_id,
+        tags=ctx.tags,
     )
     ctx.tool_charge = cost or Decimal(0)
 
@@ -5344,6 +5383,7 @@ async def _log_absorbed_row(
             counts_toward_budget=False,
             attribution=_attribution_for(ctx, attempt, absorbed=True),
             workspace_id=ctx.workspace_id,
+            tags=ctx.tags,
         )
     except Exception:
         logger.warning(
@@ -5474,6 +5514,7 @@ async def run_standalone_non_stream(
                     tool_tally=tool_ctx.tally,
                     workspace_id=ctx.workspace_id,
                     request_id=ctx.request_id,
+                    tags=ctx.tags,
                 )
             if ctx.reservation is not None:
                 await reconcile_reservation(
