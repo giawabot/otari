@@ -622,19 +622,30 @@ this is a local, otari-hook-only audit trail, never the rubric, diff,
 transcript, or model output, so counting matching lines is the source of
 truth for "how many times has this repo's judge gate actually run."
 
-Each `judge` gate costs one model invocation, not a near-instant pattern
-match like the other three gate types, so `otari hook` evaluates at most 5
-per `Stop` event (highest `priority` first, declaration order within a tie;
-the rest are skipped with a stderr message naming which) rather than letting one event's resource use grow
-without bound as a policy gains judge gates. Applicable gates run
-concurrently, not one after another (a bounded thread pool,
-`_HOOK_GATE_MAX_WORKERS` in `cli.py`, shared with `verifier`'s own
-verifier runs below): N applicable gates cost close to one gate's own
-wall-clock, not N times it.
+Each `judge` gate costs one model invocation, not a near-instant pattern match
+like the other three gate types, so `otari hook` caps how many it evaluates
+per `Stop` event (highest `priority` first, declaration order within a tie)
+rather than letting one event's resource use grow without bound as a policy
+gains judge gates. Each gate past the cap resolves `not_run`, and its line in
+`systemMessage` names the cap and how to raise it. The cap is 5 by default.
+`--max-judges` (or `OTARI_HOOK_MAX_JUDGES`) sets it to any value
+from 1 to 20. `otari guardrails validate` and `otari guardrails check` read
+the same option and variable, so a preview, a CI check and the hook agree on
+which gates run. Both refuse any other value. `otari hook` runs the default
+instead and says so in `systemMessage`, because the harness reads a refusal as
+a block. Set the variable in the
+environment the harness runs the hook in, such as the `env` block of a
+repository's `.claude/settings.json`, to apply it to one repository.
+Applicable gates run concurrently, not one after another, up to eight at a
+time (a bounded thread pool, `_HOOK_GATE_MAX_WORKERS` in `hook.py`, shared
+with `verifier`'s own verifier runs below): up to eight applicable gates cost
+close to one gate's own wall-clock, and each further eight add about one more.
+Raising the cap does not raise the shared budget below, so with slow judges a
+high cap leaves the last gates reporting `error`.
 
-A per-call timeout does not bound the total: 5 gates at up to 300s each,
-each with its own possible "prompt is too long" retry, is up to 3,000s of
-judge calls if they ever ran one after another. Claude Code's own
+A per-call timeout does not bound the total: 20 gates at the ceiling, at up to
+300s each, each with its own possible "prompt is too long" retry, are up to
+12,000s of judge calls if they ever ran one after another. Claude Code's own
 command-hook timeout defaults to 600s, past which it kills the hook and
 discards its output entirely, meaning nothing is evaluated at all for that
 `Stop` event, every gate in the guardrail going unchecked, not just the slow
@@ -837,7 +848,7 @@ load-bearing throughout.
 | --- | --- |
 | paths | Repo-relative paths this moment puts in scope: the single target a tool call is about to write or read, or what `git status` reported changed, together with which of those moments it was. |
 | commands | Shell commands observed running, or about to run. Its scope is either `call` (the single tool call about to run) or `session` (every command the session has run so far). `command` gates judge only `call` scope, `command_if_changed` only `session` scope. |
-| judge verdicts | One `pass`, `fail` or `error` per `judge` gate, from the model call `otari hook` made for it. `error` covers a CLI that was not found, a timeout, a launch failure, a nonzero exit, and output that could not be parsed as a verdict. |
+| judge verdicts | One `pass`, `fail` or `error` per `judge` gate, from the model call `otari hook` made for it. `error` covers a CLI that was not found, a timeout, a launch failure, a nonzero exit, and output that could not be parsed as a verdict. A gate past the judge gate cap gets `not_run` instead, and no model call. |
 | verifier verdicts | One `pass`, `fail` or `error` per `verifier` gate, from the script's exit status: 0, 1, and anything else respectively. |
 
 An empty list is not a missing one. Evidence collected and found empty resolves
@@ -1198,10 +1209,10 @@ intended:
   `sed -i`, a heredoc, `cp`, a script). Adding `stop.working_tree` is the
   backstop. A gate that runs only at `stop.working_tree` is not warned about:
   after the fact, but complete over the tree.
-- More `judge` or `verifier` gates than one `Stop` event evaluates (five and
-  twenty respectively), naming which ones fall past the cap. Both caps apply
-  after `when_changed` filtering, so this is the worst case: a session where
-  every one of them applies at once. This is the check a composed guardrail
+- More `judge` or `verifier` gates than one `Stop` event evaluates (the
+  `--max-judges` value, five by default, and twenty respectively), naming
+  which ones fall past the cap. Both caps apply after `when_changed` filtering,
+  so this is the worst case: a session where every one of them applies at once. This is the check a composed guardrail
   most needs and no single file can do: a directory is what makes the total
   invisible.
 
