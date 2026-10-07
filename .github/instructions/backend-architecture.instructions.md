@@ -18,8 +18,9 @@ against the rules below, and do not accept "the module next to it does the
 same" as a reason.
 
 `SERVICE_DATABASE_IMPORT_BASELINE`, `ROUTE_DATABASE_IMPORT_BASELINE`, `FLAT_MODULE_BASELINE`,
-`SERVICE_MODE_READ_BASELINE` and the baseline on each `MODEL_ACCESS` entry in
-`scripts/check_architecture.py` name the code still in the old shape.
+`SERVICE_MODE_READ_BASELINE`, `LISTENER_DEFAULT_BASELINE` and the baseline on each
+`MODEL_ACCESS` entry in `scripts/check_architecture.py` name the code still in
+the old shape.
 
 - Do not flag an existing baseline entry the PR does not touch.
 - Flag a PR that adds a name to any baseline.
@@ -71,6 +72,42 @@ same" as a reason.
 - Code still in the old shape commits in its services. Do not flag a commit
   the PR does not add.
 
+## Deployment modes
+
+The behavior for each deployment mode belongs in a binding chosen where the app
+is wired, not in a branch on the mode. The check refuses a read of
+`configured_mode`, `effective_mode`, `is_hosted_mode` or `is_hybrid_mode`, or a
+call to `deployment_for`, under `services/`. It does not catch the cases below.
+
+- Flag a service that branches on the mode another way, such as on
+  `config.mode`, on whether `config.platform_token` is set, or on the
+  `OTARI_AI_TOKEN` or `OTARI_MODE` environment variable.
+- Flag a PR that makes a builder in `api/deps.py` or a factory in
+  `container.py` read the mode and pass the answer to a service as an argument,
+  such as `on_by_default=config.is_hosted_mode`. The service then branches on
+  that argument. The builder or factory binds a different implementation for
+  each mode instead.
+- Flag a mode read added to a module already on `SERVICE_MODE_READ_BASELINE`.
+  The baseline lists modules, not reads.
+
+## Table writers
+
+Each table has one writer: the repository module that `MODEL_ACCESS` names for
+its model. The check refuses any other module that constructs or queries the
+model, except a module on the model's baseline.
+
+- Before you accept a write to a table, search the codebase, not only the
+  diff, for every module that names the model or its table. The other writer
+  is often in a file the diff does not touch.
+- Flag new code that constructs or queries a model in a module already on that
+  model's baseline in `MODEL_ACCESS`. The check does not catch that case.
+- Flag raw SQL outside the model's repository, such as `text("UPDATE ...")`.
+  It names the table and not the model, so the check does not see it.
+- When you ask for a write to move out of a service, name the model's
+  repository in `MODEL_ACCESS` as its destination. Where the entry names no
+  repository, ask for one repository module in the model's domain, named in
+  that entry. Do not ask for a second one.
+
 ## Imports between domains
 
 - Code outside a domain imports its service only through the package root,
@@ -89,6 +126,9 @@ same" as a reason.
   domain where the change happens.
 - Flag a listener implementation that commits or rolls back. The caller owns
   the transaction.
+- The check refuses a default on a parameter or a class field whose type name
+  contains `Listener`. Flag a default on a listener whose type does not name
+  it, such as a bare `Callable`.
 
 The boundary check does not enforce the cycle rule yet, so review is the only
 gate for it.
