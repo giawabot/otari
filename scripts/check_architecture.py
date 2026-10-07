@@ -488,7 +488,6 @@ ROUTE_DATABASE_IMPORT_BASELINE = (
     "gateway/api/routes/usage.py",
     "gateway/api/routes/users.py",
     "gateway/api/routes/workspace_activation.py",
-    "gateway/api/routes/workspace_code_execution_policy.py",
     "gateway/api/routes/workspace_mcp_servers.py",
     "gateway/api/routes/workspace_web_search.py",
     "gateway/api/routes/workspaces.py",
@@ -613,7 +612,6 @@ TRANSACTION_CONTROL_BASELINE = (
     "gateway/services/tenancy/user_service.py",
     "gateway/services/tenancy/webauthn_service.py",
     "gateway/services/tenancy/workspace_activation_service.py",
-    "gateway/services/tenancy/workspace_code_execution_policy_service.py",
     "gateway/services/tenancy/workspace_mcp_server_service.py",
     "gateway/services/tenancy/workspace_service.py",
     "gateway/services/tenancy/workspace_web_search_service.py",
@@ -1090,7 +1088,6 @@ DOMAIN_NAME_BASELINE: dict[str, tuple[str, ...]] = {
     "gateway/repositories/code_execution/": (
         "__init__.py",
         "sandbox_container_repository.py",
-        "workspace_code_execution_policy_repository.py",
     ),
     "gateway/repositories/tenancy/": (
         "__init__.py",
@@ -1105,7 +1102,6 @@ DOMAIN_NAME_BASELINE: dict[str, tuple[str, ...]] = {
     ),
     "gateway/services/code_execution/": (
         "__init__.py",
-        "_workspace_defaults.py",
         "container_sweeper.py",
         "containers.py",
     ),
@@ -1711,11 +1707,8 @@ MODEL_ACCESS: dict[str, ModelAccess] = {
         "baseline": ("gateway/services/search_tool_store_service.py",),
     },
     "gateway.models.tools.WorkspaceCodeExecutionPolicy": {
-        "repository": "gateway/repositories/code_execution/workspace_code_execution_policy_repository.py",
-        "baseline": (
-            "gateway/services/playground_service.py",
-            "gateway/services/tenancy/workspace_code_execution_policy_service.py",
-        ),
+        "repository": "gateway/repositories/tools/workspace_code_execution_policy_repository.py",
+        "baseline": (),
     },
     "gateway.models.tools.WorkspaceMcpServer": {
         "repository": None,
