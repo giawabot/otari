@@ -17,13 +17,14 @@ no way to send them back.
 
 from __future__ import annotations
 
+import re
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable
 from typing import Any
 
 from any_llm import AnyLLM, LLMProvider, acompletion
-from any_llm.exceptions import UnsupportedParameterError
+from any_llm.exceptions import AnyLLMError, UnsupportedParameterError
 from any_llm.types.completion import ChatCompletion, ChatCompletionChunk
 from any_llm.types.responses import Response, ResponseStreamEvent
 from openai.types.responses import (
@@ -86,6 +87,19 @@ _TRANSLATED_FIELDS = frozenset(
 # Meaningful only to a server that keeps state or runs work on its own.
 _REFUSED_FIELDS = ("previous_response_id", "conversation", "background", "context_management", "prompt")
 
+# Marks a reasoning item as gateway-made, so a client that echoes the turn back is not
+# taken for echoing a provider's own item: no upstream has an item by this id.
+_REASONING_ID_STEM = "otari_rs"
+REASONING_ITEM_ID_PREFIX = f"{_REASONING_ID_STEM}_"
+
+# 405 and 501 say the route is absent. A 404 also answers an unknown model or a
+# stored item that was never kept, so one that names either is not taken as a missing route.
+_RESPONSES_ROUTE_MISSING = frozenset({404, 405, 501})
+_NOT_A_MISSING_ROUTE = re.compile(r"\b(item|model)\b", re.IGNORECASE)
+
+# The route puts these Responses-only Codex fields in ``extra_body``; a chat request has no use for them.
+_RESPONSES_ONLY_EXTRA_BODY = ("input", "client_metadata")
+
 _BRIDGE_NOTE = "This provider has no Responses API, so the gateway serves the request as a chat completion."
 
 _TEXT_PART_TYPES = frozenset({"input_text", "output_text", "text"})
@@ -133,22 +147,67 @@ def serves_responses(provider: str | LLMProvider) -> bool:
     )
 
 
+def _lacks_responses_route(kwargs: dict[str, Any], exc: AnyLLMError) -> bool:
+    """Whether ``exc`` says a custom ``api_base`` has no Responses endpoint.
+
+    Only a caller-chosen ``api_base`` qualifies: the vendor's own endpoint has the
+    API, so there a 404 is about the request (an unknown item or model) and a chat
+    completion would only hide it.
+    """
+    if not kwargs.get("api_base") or exc.status_code not in _RESPONSES_ROUTE_MISSING:
+        return False
+    if exc.status_code == 404 and _NOT_A_MISSING_ROUTE.search(exc.message):
+        return False
+    return _supports_completion(kwargs.get("provider"))
+
+
+def _supports_completion(provider: Any) -> bool:
+    try:
+        provider_class = AnyLLM.get_provider_class(LLMProvider(provider))
+    except (ValueError, ImportError):
+        return False
+    return bool(getattr(provider_class, "SUPPORTS_COMPLETION", False))
+
+
 async def call_responses(native: Callable[..., Awaitable[Any]], kwargs: dict[str, Any]) -> Any:
     """Run ``aresponses`` keyword arguments natively, or through the bridge for a provider without the API.
 
     ``native`` is the caller's ``aresponses``, taken as an argument so the
     caller's module global stays the one place a test replaces it.
+
+    An OpenAI-compatible server behind a custom ``api_base`` may not implement
+    ``/responses`` at all. When one answers 404, 405 or 501, the request is served
+    through the bridge instead. A request the bridge cannot translate re-raises the
+    original error, because that is the one that explains what the endpoint lacks.
     """
     if uses_chat_completions_bridge(kwargs.get("provider")):
         return await aresponses_via_chat_completions(**kwargs)
-    return await native(**kwargs)
+    try:
+        return await native(**kwargs)
+    except AnyLLMError as exc:
+        if not _lacks_responses_route(kwargs, exc):
+            raise
+        try:
+            plan = _plan_chat_completion(kwargs)
+        except UnsupportedParameterError:
+            raise exc from None
+        logger.info(
+            "%s answered %s on /responses at its api_base; serving as a chat completion",
+            kwargs["provider"],
+            exc.status_code,
+        )
+        return await _run_chat_completion(*plan)
 
 
-async def aresponses_via_chat_completions(**kwargs: Any) -> Response | AsyncIterator[ResponseStreamEvent]:
-    """Run ``aresponses`` keyword arguments as a chat completion, answering in Responses shape."""
+def _plan_chat_completion(kwargs: dict[str, Any]) -> tuple[dict[str, Any], _ResponseEcho]:
+    """Translate ``aresponses`` keyword arguments, refusing what chat completions cannot carry."""
     provider = str(LLMProvider(kwargs["provider"]).value)
-    completion_kwargs = _completion_kwargs(kwargs, provider)
-    echo = _ResponseEcho.from_request(kwargs)
+    return _completion_kwargs(kwargs, provider), _ResponseEcho.from_request(kwargs)
+
+
+async def _run_chat_completion(
+    completion_kwargs: dict[str, Any], echo: _ResponseEcho
+) -> Response | AsyncIterator[ResponseStreamEvent]:
     if completion_kwargs.get("stream"):
         chunks = await acompletion(**completion_kwargs)
         assert not isinstance(chunks, ChatCompletion)
@@ -156,6 +215,11 @@ async def aresponses_via_chat_completions(**kwargs: Any) -> Response | AsyncIter
     completion = await acompletion(**completion_kwargs)
     assert isinstance(completion, ChatCompletion)
     return _completion_to_response(completion, echo)
+
+
+async def aresponses_via_chat_completions(**kwargs: Any) -> Response | AsyncIterator[ResponseStreamEvent]:
+    """Run ``aresponses`` keyword arguments as a chat completion, answering in Responses shape."""
+    return await _run_chat_completion(*_plan_chat_completion(kwargs))
 
 
 # ---------------------------------------------------------------------------
@@ -169,6 +233,12 @@ def _completion_kwargs(kwargs: dict[str, Any], provider: str) -> dict[str, Any]:
             raise UnsupportedParameterError(field, provider, _BRIDGE_NOTE)
 
     out: dict[str, Any] = {key: value for key, value in kwargs.items() if key in _SHARED_FIELDS}
+    if isinstance(extra_body := out.get("extra_body"), dict):
+        extra_body = {key: value for key, value in extra_body.items() if key not in _RESPONSES_ONLY_EXTRA_BODY}
+        if extra_body:
+            out["extra_body"] = extra_body
+        else:
+            del out["extra_body"]
     out["provider"] = kwargs["provider"]
     out["model"] = kwargs["model"]
     out["messages"] = _messages(kwargs.get("input_data"), kwargs.get("instructions"), provider)
@@ -442,7 +512,7 @@ def _completion_to_response(completion: ChatCompletion, echo: _ResponseEcho) -> 
         message = choice.message
         reasoning = getattr(message, "reasoning", None)
         if reasoning is not None and reasoning.content:
-            output.append(_reasoning_item(_new_id("rs"), reasoning.content, "completed"))
+            output.append(_reasoning_item(_new_id(_REASONING_ID_STEM), reasoning.content, "completed"))
         if message.content or message.refusal:
             output.append(_message_item(_new_id("msg"), message.content or None, "completed", message.refusal))
         for call in message.tool_calls or []:
@@ -574,7 +644,7 @@ class _StreamTranslator:
     def _reasoning_delta(self, delta: str) -> list[ResponseStreamEvent]:
         events: list[ResponseStreamEvent] = []
         if self.reasoning is None:
-            item_id = _new_id("rs")
+            item_id = _new_id(_REASONING_ID_STEM)
             index, added = self._open_item(_reasoning_item(item_id, "", "in_progress"))
             self.reasoning = (index, item_id)
             events += [

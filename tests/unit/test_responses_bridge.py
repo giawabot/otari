@@ -8,11 +8,17 @@ from unittest.mock import patch
 
 import pytest
 from any_llm import LLMProvider
-from any_llm.exceptions import UnsupportedParameterError
+from any_llm.exceptions import AnyLLMError, ModelNotFoundError, UnsupportedParameterError
 from any_llm.types.completion import ChatCompletion, ChatCompletionChunk
 from any_llm.types.responses import Response
 
-from gateway.services.inference import aresponses_via_chat_completions, uses_chat_completions_bridge
+from gateway.services.inference import (
+    REASONING_ITEM_ID_PREFIX,
+    aresponses_via_chat_completions,
+    call_responses,
+    strip_gateway_minted_items,
+    uses_chat_completions_bridge,
+)
 from gateway.services.mcp_loop_responses import responses_tool_loop, responses_tool_loop_stream
 
 _ACOMPLETION = "gateway.services.inference._responses_bridge.acompletion"
@@ -283,6 +289,26 @@ async def test_completion_translates_to_a_response() -> None:
 
 
 @pytest.mark.asyncio
+async def test_reasoning_item_id_carries_the_gateway_prefix() -> None:
+    result = await _call({}, _completion({"content": "ok", "reasoning": "thinking"}), input_data="hi")
+
+    assert result.output[0].type == "reasoning"
+    assert result.output[0].id.startswith(REASONING_ITEM_ID_PREFIX)
+
+
+def test_echoed_bridge_reasoning_is_stripped_but_a_providers_own_survives() -> None:
+    own = {"type": "reasoning", "id": "rs_68a1b2c3", "summary": []}
+    minted = {"type": "reasoning", "id": f"{REASONING_ITEM_ID_PREFIX}abc", "summary": []}
+    minted_reference = {"type": "item_reference", "id": f"{REASONING_ITEM_ID_PREFIX}abc"}
+    own_reference = {"type": "item_reference", "id": "rs_68a1b2c3"}
+    message = {"role": "user", "content": "hi"}
+
+    result = strip_gateway_minted_items([message, minted, minted_reference, own, own_reference])
+
+    assert result == [message, own, own_reference]
+
+
+@pytest.mark.asyncio
 async def test_length_finish_is_an_incomplete_response() -> None:
     result = await _call({}, _completion({"content": "cut"}, finish_reason="length"), input_data="hi")
 
@@ -502,3 +528,133 @@ async def test_streaming_tool_loop_runs_a_bridged_tool_call() -> None:
     assert types[-1] == "response.completed"
     assert "function_call" not in [getattr(getattr(event, "item", None), "type", None) for event in events]
     assert events[-1].response.output_text == "done"
+
+
+# ---------- /responses missing on a custom api_base ----------
+
+
+def _missing_route(status_code: int = 404, message: str = "Not Found") -> AnyLLMError:
+    return AnyLLMError(message, provider_name="openai", status_code=status_code)
+
+
+async def _call_responses(native_error: AnyLLMError, **kwargs: Any) -> tuple[Any, list[dict[str, Any]]]:
+    chat_calls: list[dict[str, Any]] = []
+
+    async def native(**_: Any) -> Any:
+        raise native_error
+
+    async def fake_acompletion(**call_kwargs: Any) -> Any:
+        chat_calls.append(call_kwargs)
+        return _completion({"content": "pong"})
+
+    request = {
+        "provider": LLMProvider.OPENAI,
+        "model": "local-model",
+        "api_key": "sk",
+        "api_base": "http://llm.internal/v1",
+        "input_data": "ping",
+        **kwargs,
+    }
+    with patch(_ACOMPLETION, new=fake_acompletion):
+        return await call_responses(native, request), chat_calls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status_code", [404, 405, 501])
+async def test_missing_responses_route_on_a_custom_api_base_falls_back_to_chat(status_code: int) -> None:
+    result, chat_calls = await _call_responses(_missing_route(status_code))
+
+    assert isinstance(result, Response)
+    assert result.output_text == "pong"
+    assert chat_calls[0]["api_base"] == "http://llm.internal/v1"
+    assert chat_calls[0]["messages"] == [{"role": "user", "content": "ping"}]
+
+
+@pytest.mark.asyncio
+async def test_not_found_without_a_custom_api_base_is_not_retried() -> None:
+    with pytest.raises(AnyLLMError, match="Not Found"):
+        await _call_responses(_missing_route(), api_base=None)
+
+
+@pytest.mark.asyncio
+async def test_other_native_failures_are_not_retried() -> None:
+    with pytest.raises(AnyLLMError):
+        await _call_responses(AnyLLMError("bad request", status_code=400))
+
+
+@pytest.mark.asyncio
+async def test_request_the_bridge_cannot_translate_reraises_the_native_error() -> None:
+    error = ModelNotFoundError("no such item", status_code=404)
+
+    with pytest.raises(ModelNotFoundError) as raised:
+        await _call_responses(error, previous_response_id="resp_1")
+
+    assert raised.value is error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["Item with id 'rs_1' not found", "The model `x` does not exist"])
+async def test_not_found_naming_an_item_or_model_is_not_taken_for_a_missing_route(message: str) -> None:
+    with pytest.raises(AnyLLMError, match="not found|does not exist"):
+        await _call_responses(_missing_route(404, message))
+
+
+@pytest.mark.asyncio
+async def test_item_or_model_wording_does_not_hold_back_405_or_501() -> None:
+    result, _ = await _call_responses(_missing_route(405, "Method not allowed for this model"))
+
+    assert result.output_text == "pong"
+
+
+@pytest.mark.asyncio
+async def test_chat_side_unsupported_parameter_is_not_replaced_by_the_native_error() -> None:
+    async def native(**_: Any) -> Any:
+        raise _missing_route()
+
+    async def refusing_acompletion(**_: Any) -> Any:
+        raise UnsupportedParameterError("reasoning_effort", "openai")
+
+    request = {"provider": LLMProvider.OPENAI, "model": "m", "api_base": "http://llm.internal/v1", "input_data": "hi"}
+    with patch(_ACOMPLETION, new=refusing_acompletion), pytest.raises(UnsupportedParameterError):
+        await call_responses(native, request)
+
+
+@pytest.mark.asyncio
+async def test_responses_only_extra_body_keys_stay_out_of_the_chat_request() -> None:
+    _, chat_calls = await _call_responses(
+        _missing_route(),
+        extra_body={"input": [{"role": "user", "content": "ping"}], "client_metadata": {"a": 1}, "top_k": 4},
+    )
+
+    assert chat_calls[0]["extra_body"] == {"top_k": 4}
+
+
+@pytest.mark.asyncio
+async def test_extra_body_holding_only_responses_keys_is_dropped() -> None:
+    _, chat_calls = await _call_responses(_missing_route(), extra_body={"input": []})
+
+    assert "extra_body" not in chat_calls[0]
+
+
+@pytest.mark.asyncio
+async def test_streaming_request_falls_back_to_a_bridged_event_stream() -> None:
+    async def native(**_: Any) -> Any:
+        raise _missing_route()
+
+    async def fake_acompletion(**call_kwargs: Any) -> Any:
+        assert call_kwargs["stream"] is True
+        return _aiter([_chunk({"role": "assistant", "content": "po"}), _chunk({"content": "ng"}, "stop")])
+
+    request = {
+        "provider": LLMProvider.OPENAI,
+        "model": "m",
+        "api_base": "http://llm.internal/v1",
+        "input_data": "hi",
+        "stream": True,
+    }
+    with patch(_ACOMPLETION, new=fake_acompletion):
+        stream = await call_responses(native, request)
+        types = [event.type async for event in stream]
+
+    assert types[0] == "response.created"
+    assert types[-1] == "response.completed"
