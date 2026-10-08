@@ -14,15 +14,19 @@ upstream text.
 
 import asyncio
 import json
+from typing import Any
 
 import httpx
 import pytest
 from anthropic import APITimeoutError as AnthropicAPITimeoutError
 from any_llm.exceptions import ContextLengthExceededError, InvalidRequestError, UnsupportedParameterError
+from any_llm.utils.exception_handler import convert_exception
+from botocore.exceptions import ClientError
 from openai import APITimeoutError as OpenAIAPITimeoutError
 
 from gateway.api.routes._pipeline import (
     _FORWARDED_PARAMS,
+    PROVIDER_ACCOUNT_QUOTA_DETAIL,
     PROVIDER_BAD_REQUEST_DETAIL,
     PROVIDER_BILLING_DETAIL,
     PROVIDER_CREDENTIALS_DETAIL,
@@ -450,6 +454,16 @@ def test_upstream_message_and_unsupported_feature_read_from_nested_original_exce
         ("Cannot reach http://10.0.0.4:8000/v1/chat", "10.0.0.4"),
         ("Bad request (api_key=hunter2hunter2)", "hunter2hunter2"),
         ("Model unavailable for org-DDDDDDDDDD", "org-DDDDDDDDDD"),
+        ("Profile arn:aws:bedrock:eu-west-1:123456789012:inference-profile/p1 is not ready", "123456789012"),
+        (
+            "Profile arn:aws-us-gov:bedrock:us-gov-west-1:123456789012:inference-profile/p1 failed",
+            "inference-profile/p1",
+        ),
+        ("Account 123456789012 has no access to this model", "123456789012"),
+        ("Incorrect key ab123456789012cdef0123456789abcd provided", "cdef0123456789abcd"),
+        ("Account 1234-5678-9012 has no access to this model", "1234-5678-9012"),
+        ("Denied for account123456789012", "123456789012"),
+        ("Profile ARN:AWS:bedrock:eu-west-1::inference-profile/p1 is not ready", "inference-profile/p1"),
         ("Rejected: " + "E" * 48, "E" * 48),
     ],
 )
@@ -838,3 +852,126 @@ def test_a_stream_error_event_carries_the_code_that_ended_it() -> None:
     payload = json.loads(event.removeprefix("data: "))
     assert payload["error"]["code"] == "upstream_rate_limited"
     assert openai_error_event(OPENAI_STREAM_FORMAT, None) == OPENAI_STREAM_FORMAT.error_payload
+
+
+# ---------------------------------------------------------------------------
+# Bedrock: botocore's ClientError carries its status in a response dict
+# ---------------------------------------------------------------------------
+
+_BEDROCK_INVALID_MODEL = "The provided model identifier is invalid."
+
+
+def _bedrock_error(code: str, message: str, status_code: int | None) -> ClientError:
+    """A botocore ``ClientError`` as Bedrock raises it from a Converse call."""
+    response: dict[str, Any] = {"Error": {"Code": code, "Message": message}}
+    if status_code is not None:
+        response["ResponseMetadata"] = {"HTTPStatusCode": status_code, "HTTPHeaders": {}}
+    return ClientError(response, "Converse")  # type: ignore[arg-type]
+
+
+def test_bedrock_validation_error_is_a_caller_fault_400() -> None:
+    exc = _bedrock_error("ValidationException", _BEDROCK_INVALID_MODEL, 400)
+
+    mapping = classify_provider_error(exc)
+
+    assert mapping is not None
+    assert mapping.status_code == 400
+    assert mapping.detail == _BEDROCK_INVALID_MODEL
+    assert failure_status_code(exc) == 400
+
+
+def test_bedrock_caller_fault_detail_is_still_redacted() -> None:
+    exc = _bedrock_error("ValidationException", f"Rejected {_RAW}", 400)
+
+    mapping = classify_provider_error(exc)
+
+    assert mapping is not None
+    assert "abc123" not in mapping.detail
+    assert "Converse" not in mapping.detail
+
+
+def test_bedrock_caller_fault_detail_hides_the_aws_account() -> None:
+    arn = "arn:aws:bedrock:us-east-1:123456789012:provisioned-model/abc1"
+    exc = _bedrock_error("ValidationException", f"The provisioned model {arn} is not ready.", 400)
+
+    mapping = classify_provider_error(exc)
+
+    assert mapping is not None
+    assert mapping.status_code == 400
+    assert "123456789012" not in mapping.detail
+    assert "provisioned-model/abc1" not in mapping.detail
+    assert "is not ready" in mapping.detail
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        '{"resource":"arn:aws:bedrock:us-east-1:123456789012:provisioned-model/abc1","reason":"not ready"}',
+        "Model (arn:aws:bedrock:us-east-1:123456789012:provisioned-model/abc1), reason: not ready",
+    ],
+)
+def test_redaction_masks_only_the_arn(raw: str) -> None:
+    redacted = redact_upstream_message(raw)
+
+    assert "provisioned-model/abc1" not in redacted
+    assert "not ready" in redacted
+
+
+def test_redaction_keeps_a_decimal_number() -> None:
+    assert "0.123456789012" in redact_upstream_message("temperature 0.123456789012 is out of range")
+
+
+def test_bedrock_account_quota_is_the_gateways_fault() -> None:
+    exc = _bedrock_error(
+        "ServiceQuotaExceededException", "Your request exceeded the service quota for your account.", 400
+    )
+
+    assert classify_provider_error(exc) == (502, PROVIDER_ACCOUNT_QUOTA_DETAIL)
+
+
+def test_bedrock_throttling_forwards_its_retry_after() -> None:
+    exc = _bedrock_error("ThrottlingException", "Too many requests, please wait before trying again.", 429)
+    exc.response["ResponseMetadata"]["HTTPHeaders"] = {"retry-after": "7"}
+
+    assert upstream_retry_after(exc) == "7"
+
+
+def test_bedrock_access_denied_keeps_a_fixed_detail() -> None:
+    exc = _bedrock_error("AccessDeniedException", f"User arn:aws:iam::123456789012:user/otari {_RAW}", 403)
+
+    assert classify_provider_error(exc) == (502, PROVIDER_CREDENTIALS_DETAIL)
+    assert failure_status_code(exc) == 403
+
+
+def test_bedrock_throttling_is_an_upstream_rate_limit() -> None:
+    exc = _bedrock_error("ThrottlingException", "Too many requests, please wait before trying again.", 429)
+
+    mapping = classify_provider_error(exc)
+
+    assert mapping is not None
+    assert mapping.status_code == 429
+    assert refusal_code(exc) == "upstream_rate_limited"
+
+
+def test_bedrock_service_failure_stays_the_generic_502() -> None:
+    exc = _bedrock_error("ServiceUnavailableException", _RAW, 503)
+
+    assert classify_provider_error(exc) is None
+    assert failure_status_code(exc) == 503
+
+
+def test_bedrock_error_without_a_status_stays_unclassified() -> None:
+    exc = _bedrock_error("ValidationException", _BEDROCK_INVALID_MODEL, None)
+
+    assert classify_provider_error(exc) is None
+    assert failure_status_code(exc) == 502
+
+
+def test_bedrock_status_is_read_through_the_unified_exception_wrapper() -> None:
+    wrapper = convert_exception(_bedrock_error("ValidationException", _BEDROCK_INVALID_MODEL, 400), "bedrock")
+
+    mapping = classify_provider_error(wrapper)
+
+    assert mapping is not None
+    assert mapping.status_code == 400
+    assert mapping.detail == _BEDROCK_INVALID_MODEL
