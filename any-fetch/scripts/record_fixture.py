@@ -1,11 +1,12 @@
 """Record a provider's live answer as a test fixture, with the API key redacted.
 
-    uv run python any-search/scripts/record_fixture.py <provider> <case> "<query>" [-o NAME=VALUE ...]
+    uv run python any-fetch/scripts/record_fixture.py <provider> <case> <url> [-o NAME=VALUE ...]
 
-No provider that calls HTTP ships yet (`fake` makes no request), so there is
-nothing to record until the first one lands.
+No provider that calls HTTP ships yet (`fake` makes no request, and
+`builtin` is the host's), so there is nothing to record until the first one
+lands.
 
-Runs one search against the live API, with the key from the environment
+Runs one fetch against the live API, with the key from the environment
 variable the provider's metadata names, and writes the last HTTP response to
 ``tests/fixtures/<provider>/<case>.json`` as ``{"status": ..., "body": ...}``.
 A provider's unit tests replay it through ``httpx.MockTransport``. Every
@@ -22,7 +23,7 @@ from typing import Any
 
 import httpx
 
-from any_search import AnySearch, AnySearchError
+from any_fetch import AnyFetch, AnyFetchError
 
 FIXTURES = Path(__file__).resolve().parents[1] / "tests" / "fixtures"
 REDACTED = "<redacted>"
@@ -47,14 +48,14 @@ def _option(text: str) -> tuple[str, Any]:
 
 
 async def _record(args: argparse.Namespace) -> Path:
-    metadata = AnySearch.get_provider_metadata(args.provider)
+    metadata = AnyFetch.get_provider_metadata(args.provider)
     api_key = os.environ.get(metadata.env_key) if metadata.env_key else None
     recorder = _Recorder()
     async with httpx.AsyncClient(event_hooks={"response": [recorder]}) as client:
-        async with AnySearch.create(args.provider, api_key=api_key, client=client) as engine:
+        async with AnyFetch.create(args.provider, api_key=api_key, client=client) as fetcher:
             try:
-                await engine.search(args.query, max_results=args.max_results, **dict(args.option))
-            except AnySearchError as exc:
+                await fetcher.fetch(args.url, max_chars=args.max_chars, **dict(args.option))
+            except AnyFetchError as exc:
                 # An error case is recorded as well; the provider's answer is what matters.
                 print(f"note: {exc}", file=sys.stderr)
     if recorder.last is None:
@@ -75,10 +76,10 @@ async def _record(args: argparse.Namespace) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Record a provider's live answer as a test fixture.")
-    parser.add_argument("provider", choices=AnySearch.get_supported_providers())
+    parser.add_argument("provider", choices=AnyFetch.get_supported_providers())
     parser.add_argument("case", help="the fixture's name, such as normal, empty, error or in_body_error")
-    parser.add_argument("query")
-    parser.add_argument("--max-results", type=int)
+    parser.add_argument("url")
+    parser.add_argument("--max-chars", type=int)
     parser.add_argument("-o", "--option", type=_option, action="append", default=[], metavar="NAME=VALUE")
     print(asyncio.run(_record(parser.parse_args())))
 
