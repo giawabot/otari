@@ -419,6 +419,13 @@ Audio, moderations, and direct search do not use token pricing. They reuse
 `input_price_per_million` as USD per million requests. An unpriced request on
 these endpoints is served at zero cost.
 
+A search tool's rate is keyed `provider:tool` (`exa:exa-search` for a tool named
+`exa-search` backed by `exa`), and its provider needs no entry under
+`providers:`. That rate is what a search reserves against the caller's budget
+before it runs; without one no dollars are held, though the search still holds
+one request against a request-count budget. A successful search settles at the
+provider's reported charge when it reports one, and at the rate otherwise.
+
 Rerank accepts either unit. A rerank model priced `unit: tokens` is charged
 on the input tokens the provider reports. Providers that bill reranking per
 search unit (one query over a batch of documents) report that count and no
