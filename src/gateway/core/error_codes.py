@@ -31,6 +31,8 @@ PRICING_REQUIRED = "pricing_required"
 END_USER_BUDGET_NOT_ALLOWED = "end_user_budget_not_allowed"
 ALL_CANDIDATES_REJECTED = "all_candidates_rejected"
 PROVIDER_NOT_CONFIGURED = "provider_not_configured"
+# A request body or parameter that failed schema validation (a 422).
+INVALID_REQUEST = "invalid_request"
 
 
 def error_headers(code: str, *, budget_scope: str | None = None, rule: str | None = None) -> dict[str, str]:
