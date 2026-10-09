@@ -363,10 +363,18 @@ reworded.
 | `provider_not_configured` | 424 | The gateway holds no credential for the model's provider, so nothing was sent upstream. Not a 5xx, so a client does not retry it: add the credential in `config.yml`, through the dashboard, or in the environment variable the detail names | |
 | `end_user_budget_not_allowed` | 403 | A service key named an end-user budget that is not on its `end_user_budget_ids` | |
 | `invalid_request` | 422 | The request body or a parameter failed schema validation. `detail` lists the failing fields, each with `loc`, `msg` and `type` | |
+| `provider_error` | 200, in a stream's error event only | The provider failed after the stream started, for a reason no other code names | |
 
 A failure after a stream has started arrives as an error event, which carries
 the code as `error.code` on Chat Completions and Responses:
 `{"error": {"message": "...", "type": "server_error", "code": "upstream_rate_limited"}}`.
+The status line has already gone out as `200` by then, so the event is the only
+place the failure is named. It carries the code from the table above when one
+applies (`upstream_rate_limited`, `context_length_exceeded`), otherwise
+`provider_error` when the provider failed the stream, including one it ended
+early. The message stays fixed whatever the provider said. An event with no
+`code` is a failure inside the gateway. Either way, a standalone gateway records
+the request's usage row with status `error`.
 On Messages, a stream the provider ends without `message_stop`, including one
 that sent no events at all, also ends in an `api_error` event rather than
 closing as if it had succeeded, and the request is settled as failed.
