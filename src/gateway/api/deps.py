@@ -610,21 +610,23 @@ async def verify_catalog_reader(
     The narrow exception to the rule above, for the catalog reads that describe
     the deployment rather than act on it: ``GET /api/v1/models``, ``GET /api/v1/pricing``,
     ``GET /api/v1/tools``, ``GET /api/v1/providers/catalog`` (with their by-id
-    variants) and ``GET /api/v1/tool-settings/guardrails/catalog``. The
+    variants), ``GET /api/v1/tool-settings/guardrails/catalog`` and
+    ``GET /api/v1/search-tools/providers``. The
     dashboard's Models and Pricing pages are built on these, so a session has to
     reach them; they call no provider, write nothing, and bill nothing, so
     reaching them deployment-wide costs a signed-in caller's own organization
     nothing.
 
-    The two catalogs are the reads a *tenant* rather than an operator needs. One
+    The three catalogs are the reads a *tenant* rather than an operator needs. One
     names the providers any-llm knows, which the organization provider-key form
-    offers as the BYO choices; the other names the guardrails any-guardrail
-    reaches over a hosted API, which the organization guardrail form offers the
-    same way. An owner or admin who reaches no operator route still has to read
-    both.
+    offers as the BYO choices; one names the guardrails any-guardrail reaches
+    over a hosted API, which the organization guardrail form offers the same
+    way; and one names the providers any-search and any-fetch serve, for the
+    organization's own search keys. An owner or admin who reaches no operator
+    route still has to read all three.
 
     Split out rather than left as a branch inside the other dependency so that
-    adding a route to this plane defaults to refusing the cookie. The five
+    adding a route to this plane defaults to refusing the cookie. The six
     routers that serve these reads declare it on the router for the same reason,
     so admitting a session is spelled where the route is mounted rather than in
     one route's decorator.
@@ -632,6 +634,26 @@ async def verify_catalog_reader(
     if session_identity is not None:
         return None, True
     return await verify_api_key_or_master_key(request, db, config)
+
+
+async def catalog_reader_operates_deployment(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    session_identity: Annotated[TenancyUser | None, Depends(get_session_identity)],
+    auth: Annotated[tuple[APIKey | None, bool], Depends(verify_catalog_reader)],
+) -> bool:
+    """Whether a caller :func:`verify_catalog_reader` admitted operates the deployment.
+
+    The question :func:`require_deployment_operator` asks, answered rather than
+    enforced, for a catalog read that shows its operator what it withholds from
+    everyone else. A session is put to the same
+    ``DeploymentUserService.has_administration_access``. Without one, the caller
+    holds the master key, which operates the deployment, or an API key, which
+    does not.
+    """
+    if session_identity is not None:
+        return await DeploymentUserService(db).has_administration_access(session_identity)
+    _, is_master_key = auth
+    return is_master_key
 
 
 async def verify_catalog_reader_or_public(

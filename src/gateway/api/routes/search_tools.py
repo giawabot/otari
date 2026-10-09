@@ -16,27 +16,39 @@ Operator-gated and standalone-only (the router is not mounted in hybrid). URL
 validation is structural, matching ``/api/v1/tool-settings`` rather than the provider
 SSRF gate: the backend this most often points at is a SearXNG sidecar on a
 private address, which a deny-private gate would refuse.
+
+``/api/v1/search-tools/providers`` is the exception, on ``catalog_router``: it lists
+the providers any-search and any-fetch serve, which is a property of the build
+rather than of this deployment, so any catalog reader may see it. What it says
+about this deployment, its tools and their inherited endpoints, only an operator
+sees.
 """
 
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from gateway.api.deps import get_config, get_db, require_deployment_operator
+from gateway.api.deps import (
+    catalog_reader_operates_deployment,
+    get_config,
+    get_db,
+    require_deployment_operator,
+    verify_catalog_reader,
+)
 from gateway.core.config import GatewayConfig
 from gateway.core.settings.tools import (
     SEARCH_PROVIDERS,
     SEARCH_PROVIDERS_REQUIRING_API_BASE,
-    SEARCH_PROVIDERS_REQUIRING_API_KEY,
-    default_api_base,
+    ToolKind,
     validate_search_tool_entry,
     validate_search_tool_transport,
 )
 from gateway.log_config import logger
 from gateway.models.tools import SearchToolCredential
+from gateway.schemas.tools import SearchProviderSchema
 from gateway.services.search_tool_store_service import (
     UNSET,
     config_file_search_tools,
@@ -54,29 +66,24 @@ from gateway.services.secret_box import (
     decrypt_secret,
 )
 from gateway.services.tool_settings_service import validate_url
+from gateway.services.tools import search_provider_catalog
 
 router = APIRouter(
     prefix="/search-tools",
     tags=["search-tools"],
     dependencies=[Depends(require_deployment_operator)],
 )
-
-
-class SearchProviderSchema(BaseModel):
-    """One search provider this build can dispatch to, for the add-tool picker."""
-
-    id: str = Field(description="Value to send as 'provider'.")
-    requires_api_key: bool = Field(description="True when a tool on this provider must carry an API key.")
-    requires_api_base: bool = Field(
-        description="True when this provider has no endpoint of its own, so the tool must say where the backend is."
-    )
-    default_api_base: str | None = Field(
-        default=None,
-        description=(
-            "The endpoint a tool on this provider uses when it declares no api_base. "
-            "Null means nothing supplies one, so an api_base is required."
-        ),
-    )
+# The provider catalog, which describes the installed libraries, and only to an
+# operator anything this deployment configured. A tenant reaches it:
+# organization search keys name a provider too, and it is owners and admins who
+# fill that form, never an operator. Gated like the other catalog reads so
+# admitting a session is spelled at the router (see
+# ``deps.verify_catalog_reader``).
+catalog_router = APIRouter(
+    prefix="/search-tools",
+    tags=["search-tools"],
+    dependencies=[Depends(verify_catalog_reader)],
+)
 
 
 class StoredSearchToolSchema(BaseModel):
@@ -239,25 +246,29 @@ async def _apply_write(db: AsyncSession, config: GatewayConfig, name: str) -> No
         logger.warning("Search tool overlay refresh failed after writing '%s'; converges within TTL", name)
 
 
-@router.get("/providers")
+@catalog_router.get("/providers")
 async def list_search_providers(
     config: Annotated[GatewayConfig, Depends(get_config)],
+    operates: Annotated[bool, Depends(catalog_reader_operates_deployment)],
+    kind: Annotated[
+        ToolKind, Query(description="Which providers to list: search providers (the default) or fetch providers.")
+    ] = "search",
 ) -> list[SearchProviderSchema]:
-    """List the search providers this build can dispatch to, for the add-tool form.
+    """List the providers a search or fetch tool may name, for the add-tool form.
 
-    Reports per provider whether an API key is required and what endpoint a tool
-    inherits when it declares none, so the form can ask for exactly what the
-    chosen provider needs instead of taking a free-text provider name.
+    The list comes from the metadata any-search and any-fetch publish, so a
+    provider either library adds appears with no change to the gateway. Reports
+    per provider whether an API key is required, what endpoint a tool inherits
+    when it declares none, and the native options a tool may set. Providers that
+    exist only for tests are left out, and so is the fetch provider ``builtin``,
+    which only the implicit ``builtin_fetch`` tool uses.
+
+    What belongs to this deployment rather than to the libraries, its own tools
+    on each provider and an endpoint a tool inherits from its settings, is
+    shown only to a caller who operates the deployment: the tool settings
+    reader withholds the same from anyone else.
     """
-    return [
-        SearchProviderSchema(
-            id=provider,
-            requires_api_key=provider in SEARCH_PROVIDERS_REQUIRING_API_KEY,
-            requires_api_base=provider in SEARCH_PROVIDERS_REQUIRING_API_BASE,
-            default_api_base=default_api_base(config, provider),
-        )
-        for provider in SEARCH_PROVIDERS
-    ]
+    return search_provider_catalog(config, kind, operates=operates)
 
 
 @router.get("")
