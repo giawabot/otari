@@ -9376,8 +9376,11 @@ export interface components {
          * @description What issuing an invitation produces, and whether the email actually went out.
          */
         InviteOrganizationMemberResultPublic: {
-            /** Accept Link */
-            accept_link: string;
+            /**
+             * Accept Link
+             * @description The link to share with the invitee yourself, set only when mail_sent is false. A delivered link goes to the invitee's mailbox alone, so the inviter cannot open it as them.
+             */
+            accept_link?: string | null;
             /**
              * Created At
              * Format: date-time
@@ -9397,7 +9400,7 @@ export interface components {
             invitation_id: string;
             /**
              * Mail Sent
-             * @description Whether the invitation email was actually dispatched. False when mail is not configured, or the send itself failed; accept_link is set either way, so the operator can share it themselves rather than the invitation being a dead end.
+             * @description Whether the invitation email was actually dispatched. False when mail is not configured, or the send itself failed.
              */
             mail_sent: boolean;
             /**

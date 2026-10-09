@@ -578,8 +578,8 @@ descriptions along the lines above.
 
 ## Mail
 
-Mail is optional. Invitations always return an accept link, and an invitee who
-has never signed in chooses a password on the page it opens, so members can join
+Mail is optional. An invitation that is not emailed returns its accept link, and an invitee new
+to the deployment chooses a password on the page it opens, so members can join
 a deployment with no transport configured. Without mail, signup, email verification, and password
 reset are unavailable.
 

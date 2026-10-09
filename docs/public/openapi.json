@@ -7348,8 +7348,16 @@
         "description": "What issuing an invitation produces, and whether the email actually went out.",
         "properties": {
           "accept_link": {
-            "title": "Accept Link",
-            "type": "string"
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The link to share with the invitee yourself, set only when mail_sent is false. A delivered link goes to the invitee's mailbox alone, so the inviter cannot open it as them.",
+            "title": "Accept Link"
           },
           "created_at": {
             "format": "date-time",
@@ -7371,7 +7379,7 @@
             "type": "string"
           },
           "mail_sent": {
-            "description": "Whether the invitation email was actually dispatched. False when mail is not configured, or the send itself failed; accept_link is set either way, so the operator can share it themselves rather than the invitation being a dead end.",
+            "description": "Whether the invitation email was actually dispatched. False when mail is not configured, or the send itself failed.",
             "title": "Mail Sent",
             "type": "boolean"
           },
@@ -7397,7 +7405,6 @@
           "email",
           "role",
           "mail_sent",
-          "accept_link",
           "expires_at",
           "created_at"
         ],
