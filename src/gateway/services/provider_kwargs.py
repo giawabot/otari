@@ -39,6 +39,7 @@ import hashlib
 import hmac
 import json
 import os
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -226,6 +227,102 @@ def credential_ladder_exhausted(provider: LLMProvider, kwargs: dict[str, Any]) -
     if provider_credential_env_names(provider.value) == ():
         return False
     return not _provider_env_key_present(provider)
+
+
+# Instances already reported as ignored, so the warning is logged once per
+# instance per process rather than on every overlay refresh.
+_uncredentialed_warned: set[str] = set()
+
+
+def uncredentialed_env_names(config: GatewayConfig, instance: str, entry: Mapping[str, Any]) -> tuple[str, ...] | None:
+    """The variables a ``providers:`` entry could have taken its credential from, or ``None``.
+
+    ``None`` means the entry can be called as it stands: it carries a credential
+    or an ``api_base`` (which takes the keyless placeholder), its provider needs
+    no key, the provider's own variable is set, or the provider cannot be
+    inspected at all. A tuple means the entry declares nothing a call could
+    authenticate with: ``api_key: ${VAR}`` with ``VAR`` set but empty is the
+    usual way to get here.
+    """
+    try:
+        provider = LLMProvider(config.provider_instance_type(instance))
+    except ValueError:
+        return None
+    env_names = provider_credential_env_names(provider.value)
+    if not env_names:
+        return None
+    if _entry_declares_a_credential(entry):
+        return None
+    # Asked with no kwargs: the entry contributes nothing that authenticates, so
+    # the provider's own rules (keyless, ambient credentials, its variable being
+    # set) decide whether the call could still go out.
+    if not credential_ladder_exhausted(provider, {}):
+        return None
+    return tuple(env_names)
+
+
+# Field names that hold something a call can authenticate with. An entry's other
+# fields are call options (``temperature``, ``timeout``), which a request would
+# carry upstream without ever being let in.
+_CREDENTIAL_FIELD = re.compile(r"key|token|secret|credential|password|auth", re.IGNORECASE)
+
+
+def _entry_declares_a_credential(entry: Mapping[str, Any]) -> bool:
+    """Whether a ``providers:`` entry holds anything a call could authenticate with.
+
+    A non-empty credential-named field does, and so does an ``api_base`` (which
+    takes the keyless placeholder) or ``client_args`` carrying a credential-named
+    field, such as an ``Authorization`` default header.
+    """
+    for key, value in entry.items():
+        if key in _INSTANCE_META_KEYS or not value:
+            continue
+        if key == "api_base" or _CREDENTIAL_FIELD.search(key):
+            return True
+        if key == "client_args" and isinstance(value, Mapping) and _mapping_declares_a_credential(value):
+            return True
+    return False
+
+
+def _mapping_declares_a_credential(mapping: Mapping[str, Any]) -> bool:
+    for key, value in mapping.items():
+        if not value:
+            continue
+        if _CREDENTIAL_FIELD.search(str(key)):
+            return True
+        if isinstance(value, Mapping) and _mapping_declares_a_credential(value):
+            return True
+    return False
+
+
+def prune_uncredentialed_providers(config: GatewayConfig) -> dict[str, tuple[str, ...]]:
+    """Drop every ``providers:`` entry that declares no credential, and say so once.
+
+    A hollow entry is worse than no entry: an ``instance:model`` selector that
+    matches it never consults an organization's own key for the same provider,
+    and a bare ``provider:model`` selector is gated and priced as if the
+    deployment served it, so the credential an operator stored on the dashboard
+    goes unused while every request fails upstream. Returns what was dropped,
+    keyed by instance, with the variables that would have filled each.
+    """
+    pruned = {
+        instance: env_names
+        for instance, entry in config.providers.items()
+        if isinstance(entry, Mapping) and (env_names := uncredentialed_env_names(config, instance, entry)) is not None
+    }
+    for instance, env_names in pruned.items():
+        del config.providers[instance]
+        if instance in _uncredentialed_warned:
+            continue
+        _uncredentialed_warned.add(instance)
+        logger.warning(
+            "providers.%s declares no credential and none of %s is set, so the entry is ignored. A credential "
+            "stored for the provider through the dashboard serves its requests instead.",
+            instance,
+            # codeql[py/clear-text-logging-sensitive-data]
+            ", ".join(env_names),
+        )
+    return pruned
 
 
 def get_provider_kwargs(
