@@ -41,12 +41,12 @@ import json
 import os
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from any_llm import AnyLLM, LLMProvider
-from any_llm.exceptions import AnyLLMError
+from any_llm.exceptions import AnyLLMError, MissingApiKeyError
 
 from gateway.auth.vertex_auth import setup_vertex_environment
 from gateway.core.config import (
@@ -56,6 +56,7 @@ from gateway.core.config import (
     GatewayConfig,
     provider_credential_env_names,
 )
+from gateway.core.error_codes import PROVIDER_NOT_CONFIGURED
 from gateway.core.provider_params import FORBIDDEN_ENDPOINT_DEFAULTS
 from gateway.log_config import logger
 from gateway.services.alias_service import resolve_effective_alias
@@ -755,3 +756,50 @@ def is_deployment_instance_key(config: GatewayConfig, model_key: str) -> bool:
     """
     split = split_selector(model_key)
     return split is not None and split[0] in config.providers
+
+
+@dataclass(frozen=True)
+class MissingCredential:
+    """A call any-llm refused locally because no credential resolved for its provider.
+
+    Nothing reached the provider, so the failure is the deployment's
+    configuration rather than the provider's, and it is named in Otari's terms.
+    The variable is a name, never a value, so it is safe to show.
+
+    Answered with a 424 rather than a 502: clients retry a 5xx, and no retry can
+    supply a key. ``code`` lets a caller tell it from a provider's own 424.
+    """
+
+    provider: str
+    env_var: str | None
+    status_code: ClassVar[int] = 424
+    code: ClassVar[str] = PROVIDER_NOT_CONFIGURED
+
+    @property
+    def detail(self) -> str:
+        detail = (
+            f"No credential is configured for provider '{self.provider}'. "
+            "Add one in config.yml or through the dashboard"
+        )
+        return f"{detail}, or set {self.env_var}." if self.env_var else f"{detail}."
+
+
+def missing_credential(exc: BaseException) -> MissingCredential | None:
+    """The missing credential behind ``exc``, read through its ``original_exception`` chain."""
+    current: BaseException | None = exc
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, MissingApiKeyError):
+            return MissingCredential(provider=current.provider_name or "unknown", env_var=current.env_var_name)
+        current = getattr(current, "original_exception", None)
+    return None
+
+
+def no_candidate_configured_detail(missing: Sequence[MissingCredential]) -> str:
+    """Why a request failed when every candidate it could use lacked a credential."""
+    names = ", ".join(sorted({entry.provider for entry in missing})) or "unknown"
+    return (
+        f"No credential is configured for any provider this request could use ({len(missing)} attempts: {names}). "
+        "Add one in config.yml or through the dashboard."
+    )

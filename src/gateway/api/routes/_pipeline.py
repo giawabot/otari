@@ -229,6 +229,7 @@ from gateway.services.pricing_service import (
 from gateway.services.provider_kwargs import (
     ResolvedProvider,
     credential_ladder_exhausted,
+    missing_credential,
     provider_key,
     resolve_provider_selector,
 )
@@ -381,6 +382,8 @@ PROVIDER_ACCOUNT_QUOTA_DETAIL = (
     "Raise the quota, or route this model to another provider."
 )
 PROVIDER_RATE_LIMITED_DETAIL = "The provider rate-limited this request"
+
+
 ALL_PROVIDERS_FAILED_DETAIL = "All upstream providers failed"
 ALL_PROVIDERS_TIMED_OUT_DETAIL = "All upstream providers timed out"
 ALL_PROVIDERS_RATE_LIMITED_DETAIL = "All upstream providers rate-limited this request"
@@ -634,6 +637,9 @@ def classify_provider_error(exc: BaseException) -> ProviderErrorMapping | None:
     shared with the hybrid-mode fallback classifier via
     :func:`upstream_exception_shape`, so both stay in sync.
     """
+    missing = missing_credential(exc)
+    if missing is not None:
+        return ProviderErrorMapping(missing.status_code, missing.detail)
     kind, status_code = upstream_exception_shape(exc)
     if kind == "timeout":
         return ProviderErrorMapping(status.HTTP_504_GATEWAY_TIMEOUT, PROVIDER_TIMEOUT_DETAIL)
@@ -710,6 +716,9 @@ def provider_error_headers(exc: BaseException, status_code: int) -> dict[str, st
     """
     if status_code == status.HTTP_400_BAD_REQUEST and _is_context_length_error(exc):
         return error_headers(CONTEXT_LENGTH_EXCEEDED)
+    missing = missing_credential(exc)
+    if missing is not None and status_code == missing.status_code:
+        return error_headers(missing.code)
     if status_code != status.HTTP_429_TOO_MANY_REQUESTS:
         return None
     headers = error_headers(UPSTREAM_RATE_LIMITED)
@@ -760,6 +769,11 @@ def failure_status_code(exc: BaseException) -> int:
     """
     if isinstance(exc, MaxToolIterationsExceeded):
         return status.HTTP_422_UNPROCESSABLE_CONTENT
+    # Before the wrapper's own status: a wrapper can carry a 500 around a
+    # credential any-llm never found, and the row records what the caller saw.
+    missing = missing_credential(exc)
+    if missing is not None:
+        return missing.status_code
     _kind, status_code = upstream_exception_shape(exc)
     if status_code is not None:
         return status_code

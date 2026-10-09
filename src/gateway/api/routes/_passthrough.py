@@ -50,6 +50,7 @@ from gateway.api.routes._pipeline import (
 from gateway.api.routes._platform import _classify_upstream_error
 from gateway.core.config import GatewayConfig
 from gateway.core.database import release_session
+from gateway.core.error_codes import error_headers
 from gateway.core.metered_pricing import billable_usage, price_billable_usage, quantize_cost
 from gateway.inflight import track_request
 from gateway.log_config import logger
@@ -86,7 +87,7 @@ from gateway.services.pricing_service import (
     no_pricing_error_detail,
     pricing_required_but_missing,
 )
-from gateway.services.provider_kwargs import ResolvedProvider, resolve_provider_selector
+from gateway.services.provider_kwargs import ResolvedProvider, missing_credential, resolve_provider_selector
 from gateway.services.tenancy.org_provider_key_service import cached_org_model_restriction
 from gateway.services.workspace_scope import organization_for_workspace_id, resolve_workspace_id
 
@@ -554,6 +555,13 @@ async def run_passthrough(
     except Exception as e:
         await log_writer.put(_usage_row("error", error_message=str(e), status_code=failure_status_code(e)))
         await refund_reservation(db, reservation)
+
+        missing = missing_credential(e)
+        if missing is not None:
+            logger.warning("No credential configured for %s:%s", resolved.provider, resolved.model)
+            raise HTTPException(
+                status_code=missing.status_code, detail=missing.detail, headers=error_headers(missing.code)
+            ) from e
 
         mapped = map_provider_error(e) if map_provider_error else None
         if mapped is not None:
