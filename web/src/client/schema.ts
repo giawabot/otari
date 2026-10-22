@@ -6735,6 +6735,9 @@ export interface paths {
         /**
          * Add Workspace Member
          * @description Add an existing organization member to a workspace.
+         *
+         *     The 404 for a workspace deleted during the add describes PostgreSQL. SQLite does not name the
+         *     foreign key it enforced, so it surfaces that race as a 500.
          */
         post: operations["workspaces-add_workspace_member"];
         /**
@@ -29878,6 +29881,24 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["WorkspaceMemberPublic"];
+                };
+            };
+            /** @description The workspace does not exist, or was deleted during the add. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationRefusal"];
+                };
+            };
+            /** @description The user is already a member of the workspace. */
+            409: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationRefusal"];
                 };
             };
             /** @description Validation Error */

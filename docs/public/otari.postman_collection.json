@@ -12266,7 +12266,7 @@
         {
           "name": "Add Workspace Member",
           "request": {
-            "description": "Add an existing organization member to a workspace.",
+            "description": "Add an existing organization member to a workspace.\n\nThe 404 for a workspace deleted during the add describes PostgreSQL. SQLite does not name the\nforeign key it enforced, so it surfaces that race as a 500.",
             "header": [],
             "method": "POST",
             "url": {

@@ -48688,7 +48688,7 @@
         ]
       },
       "post": {
-        "description": "Add an existing organization member to a workspace.",
+        "description": "Add an existing organization member to a workspace.\n\nThe 404 for a workspace deleted during the add describes PostgreSQL. SQLite does not name the\nforeign key it enforced, so it surfaces that race as a 500.",
         "operationId": "workspaces-add_workspace_member",
         "parameters": [
           {
@@ -48740,6 +48740,26 @@
               }
             },
             "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationRefusal"
+                }
+              }
+            },
+            "description": "The workspace does not exist, or was deleted during the add."
+          },
+          "409": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationRefusal"
+                }
+              }
+            },
+            "description": "The user is already a member of the workspace."
           },
           "422": {
             "content": {
