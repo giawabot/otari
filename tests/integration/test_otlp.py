@@ -523,6 +523,76 @@ def test_otlp_gateway_client_name_falls_back_to_otel_source(
     assert row.source == "otel"
 
 
+def test_otlp_a_judge_gates_model_calls_are_booked_to_the_agents_session(
+    client: TestClient, master_key_header: dict[str, str], db_session: Session
+) -> None:
+    """``otari hook`` reports a judge's tokens on its gate span; they are the session's usage, not an app's."""
+    headers = _exempt_key(client, master_key_header)
+    span_id = "abc19b7ec3c1b174"
+    gate = {
+        "traceId": base64.b64encode(bytes.fromhex("6b8efff798038103d269b633813fc60c")).decode(),
+        "spanId": base64.b64encode(bytes.fromhex(span_id)).decode(),
+        "name": "otari.gate",
+        "startTimeUnixNano": "1784000000000000000",
+        "endTimeUnixNano": "1784000040000000000",
+        "attributes": [
+            _attr(key, value)
+            for key, value in {
+                "session.id": "77192d4d-b969-44eb-bb05-e7ca84f6dfab",
+                "otari.harness": "claude-code",
+                "otari.gate.id": "writing-style",
+                "otari.gate.type": "judge",
+                "otari.gate.outcome": "pass",
+                "otari.gate.moment": "stop",
+                "gen_ai.provider.name": "anthropic",
+                "gen_ai.request.model": "claude-haiku-4-5-20251001",
+                "gen_ai.usage.input_tokens": 9,
+                "gen_ai.usage.output_tokens": 111,
+                "gen_ai.usage.cache_write_tokens": 6684,
+            }.items()
+        ],
+    }
+    # A call the judge made on a second model comes on a usage span under the gate, at its own rate.
+    side_id = "abc19b7ec3c1b175"
+    side = {
+        **gate,
+        "spanId": base64.b64encode(bytes.fromhex(side_id)).decode(),
+        "parentSpanId": gate["spanId"],
+        "name": "otari.gate.usage",
+        "attributes": [
+            _attr(key, value)
+            for key, value in {
+                "session.id": "77192d4d-b969-44eb-bb05-e7ca84f6dfab",
+                "otari.gate.id": "writing-style",
+                "gen_ai.provider.name": "anthropic",
+                "gen_ai.request.model": "claude-sonnet-4-5",
+                "gen_ai.usage.input_tokens": 300,
+                "gen_ai.usage.output_tokens": 20,
+            }.items()
+        ],
+    }
+    body = {"resourceSpans": [{"scopeSpans": [{"scope": {"name": "otari.hook"}, "spans": [gate, side]}]}]}
+
+    resp = client.post("/otlp/v1/traces", json=body, headers=headers)
+
+    assert resp.status_code == 200, resp.text
+    row = db_session.query(UsageLog).filter(UsageLog.source_event_id == span_id).one()
+    assert (row.source, row.source_label, row.model, row.prompt_tokens, row.cache_write_tokens) == (
+        "otari-hook",
+        "77192d4d-b969-44eb-bb05-e7ca84f6dfab",
+        "claude-haiku-4-5-20251001",
+        9,
+        6684,
+    )
+    other = db_session.query(UsageLog).filter(UsageLog.source_event_id == side_id).one()
+    assert (other.source, other.source_label, other.model, other.prompt_tokens) == (
+        "otari-hook",
+        "77192d4d-b969-44eb-bb05-e7ca84f6dfab",
+        "claude-sonnet-4-5",
+        300,
+    )
+
+
 def test_otlp_traces_store_every_span_on_the_exporting_keys_trace(
     client: TestClient, master_key_header: dict[str, str], db_session_factory: Any
 ) -> None:
