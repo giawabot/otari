@@ -211,7 +211,7 @@ from gateway.services.code_execution import (
     SandboxContainerRegistry,
     names_provider_container,
 )
-from gateway.services.files import ProviderFile, SandboxFileBridge, produced_files_for
+from gateway.services.files import ProviderFile, SandboxFileBridge, produced_files_for, store_inline_outputs
 from gateway.services.guardrails import InProcessGuardrail
 from gateway.services.inference import (
     EMPTY_COMPLETION_DETAIL,
@@ -383,6 +383,7 @@ from gateway.streaming import (
 )
 from gateway.types.attempt import Attempt
 from gateway.types.normalization_target import NormalizationTarget
+from gateway.types.provider_account import ResolvedCredential
 from gateway.types.session_principal import SessionPrincipal
 from gateway.types.tool_charges import describe_rate_key
 
@@ -3045,6 +3046,24 @@ async def resolve_request_context(
         code_execution_policy_loaded = True
 
     if normalize_messages is not None:
+
+        async def _hosted_credential() -> ResolvedCredential | None:
+            # The rung ``_serve_from_hosted_credential`` adds at dispatch, which a routed chain does not take.
+            if gate_instance is None or (plan is not None and len(plan.attempts) > 1):
+                return None
+            hosted = await hosted_credential_for(
+                model_provider,
+                organization_id=organization_id,
+                workspace_id=workspace_id,
+                provider=gate_instance,
+                model=gate_model,
+            )
+            if hosted is None or hosted.api_key is None:
+                return None
+            return ResolvedCredential(
+                api_key=hosted.api_key, api_base=hosted.api_base, client_args=dict(hosted.client_args or {})
+            )
+
         try:
             # The caller's own workspace, not the resolved one: the key's for
             # a keyed request, the session's for a Playground one, and None
@@ -3059,11 +3078,13 @@ async def resolve_request_context(
                     model=gate_model,
                     instance=gate_instance,
                     file_workspace_id=_caller_workspace_id(api_key, session_principal),
+                    credential_workspace_id=workspace_id,
                     workspace_executor=(code_execution_policy.executor if code_execution_policy is not None else None),
                     candidate_providers=(
                         tuple(attempt.provider for attempt in plan.attempts) if plan is not None else (gate_impl,)
                     ),
                     upstream_user=upstream_user,
+                    hosted_credential=_hosted_credential,
                 )
             )
             # Bill the vision describe side-call before the reservation
@@ -3112,6 +3133,10 @@ async def resolve_request_context(
                     strategy=config.budget_strategy,
                 )
         except HTTPException:
+            await refund_reservation(db, reservation)
+            raise
+        except asyncio.CancelledError:
+            # A client that disconnects during an attachment upload, which can run for minutes.
             await refund_reservation(db, reservation)
             raise
         except TenancyError as exc:
@@ -4226,13 +4251,18 @@ async def _copy_provider_files(
 
 
 async def _copying_produced_files(
-    stream: AsyncIterator[ChunkT], dialect: str, copy: Callable[[list[ProviderFile]], Awaitable[None]]
+    stream: AsyncIterator[ChunkT],
+    dialect: str,
+    copy: Callable[[list[ProviderFile]], Awaitable[None]],
+    files_bridge: SandboxFileBridge,
 ) -> AsyncIterator[ChunkT]:
-    """Forward ``stream`` unchanged, copying the provider-held files an event cites before that event goes on.
+    """Forward ``stream``, copying the provider-held files an event cites before that event goes on.
 
-    So the caller never sees a file ID before Otari holds the file's bytes.
+    So the caller never sees a file ID before Otari holds the file's bytes. A file
+    the provider sent inline (Gemini) is stored and the event rewritten to name it.
     """
     async for chunk in stream:
+        await store_inline_outputs(dialect, chunk, files_bridge.store_provider_output)
         if files := produced_files_for(dialect, chunk):
             await copy(files)
         yield chunk
@@ -5912,7 +5942,7 @@ async def run_single_attempt_stream(
         async def _copy(files: list[ProviderFile]) -> None:
             await _copy_provider_files(ctx, files_bridge, files, instance=provider)
 
-        stream = _copying_produced_files(stream, adapter.name, _copy)
+        stream = _copying_produced_files(stream, adapter.name, _copy, files_bridge)
 
     return build_streaming_response(
         adapter=adapter,
@@ -6302,6 +6332,8 @@ async def run_non_stream(
                 ctx.db, ctx.reservation, logged.cost or Decimal(0), actual_tokens=_settled_tokens(usage_data)
             )
         _attach_settled_cost(adapter, result, logged)
+        if tool_ctx.sandbox_files is not None:
+            await store_inline_outputs(adapter.name, result, tool_ctx.sandbox_files.store_provider_output)
         await _copy_provider_files(
             ctx, tool_ctx.sandbox_files, produced_files_for(adapter.name, result), instance=provider
         )

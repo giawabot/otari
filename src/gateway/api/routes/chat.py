@@ -88,6 +88,8 @@ from gateway.services.tools import (
     WEB_SEARCH_HEADER,
     Dialect,
     ToolUseBudget,
+    provider_attempt_kwargs,
+    with_typed_code_execution_tool,
     without_otari_tool_calls,
 )
 from gateway.services.traces import read_turn
@@ -308,6 +310,7 @@ class _ChatAdapter:
             total_tokens=chunk.usage.total_tokens or 0,
             prompt_tokens_details=details,
             cache_read_tokens=(details.cached_tokens or 0) if details is not None else 0,
+            cache_write_tokens=(details.cache_write_tokens or 0) if details is not None else 0,
             reasoning_tokens=reasoning_tokens_of(chunk.usage),
         )
         return GatewayUsage(**fields)
@@ -414,7 +417,7 @@ class _ChatAdapter:
         attempt: Attempt,
         base_request_fields: dict[str, Any],
     ) -> dict[str, Any]:
-        return attempt.call_kwargs(base_request_fields)
+        return provider_attempt_kwargs(attempt.call_kwargs(base_request_fields))
 
 
 def _user_fields(kwargs: dict[str, Any], identifier: str) -> dict[str, Any]:
@@ -553,6 +556,8 @@ async def run_chat_completion(
     # message it sends back. A provider rejects the field, so it goes before
     # admission sizes the prompt.
     request.messages = without_otari_tool_calls(request.messages)
+    if (typed_tools := with_typed_code_execution_tool(request.tools)) is not request.tools:
+        request.tools = typed_tools
 
     # Uploads the normalizer found for the code-execution sandbox, handed to the
     # sandbox session once the billed user and workspace are resolved.
@@ -573,6 +578,9 @@ async def run_chat_completion(
             user_id=target.user_id,
             instance=target.instance,
             workspace_id=target.file_workspace_id,
+            candidates=target.candidate_providers,
+            credential_workspace_id=target.credential_workspace_id,
+            hosted_credential=target.hosted_credential,
             upstream_user=target.upstream_user,
             sandbox_requested=sandbox_requested(
                 request.tools,
@@ -687,8 +695,8 @@ async def run_chat_completion(
         resolved = await resolve_dispatch_provider(
             ctx, config, request.model, adapter=adapter, model_provider=model_provider, billing=billing
         )
-        call_kwargs = apply_endpoint_defaults(
-            {**resolved.kwargs, **request_fields, "model": resolved.dispatch_model}, resolved
+        call_kwargs = provider_attempt_kwargs(
+            apply_endpoint_defaults({**resolved.kwargs, **request_fields, "model": resolved.dispatch_model}, resolved)
         )
         return await run_single_attempt_stream(
             adapter=adapter,
@@ -704,8 +712,8 @@ async def run_chat_completion(
     resolved = await resolve_dispatch_provider(
         ctx, config, request.model, adapter=adapter, model_provider=model_provider, billing=billing
     )
-    call_kwargs = apply_endpoint_defaults(
-        {**resolved.kwargs, **request_fields, "model": resolved.dispatch_model}, resolved
+    call_kwargs = provider_attempt_kwargs(
+        apply_endpoint_defaults({**resolved.kwargs, **request_fields, "model": resolved.dispatch_model}, resolved)
     )
     result = await run_non_stream(
         adapter=adapter,
