@@ -104,6 +104,7 @@ from gateway.core.config import (
     PROVIDER_HEADER,
     REQUEST_ID_HEADER,
     RESPONSE_DURATION_HEADER,
+    SERVER_TIMING_HEADER,
     GatewayConfig,
 )
 from gateway.core.database import DATABASE_ERRORS, describe_database_error, release_session
@@ -1253,6 +1254,9 @@ class RequestContext:
         # Monotonic clock reading taken at the very start of the handler
         # preamble; used to compute the usage log's latency_ms at settlement.
         self.started_at = started_at
+        # Monotonic clock reading taken as the first provider attempt is sent,
+        # which splits ``Server-Timing`` into the gateway's time and the provider's.
+        self.dispatched_at: float | None = None
         # The provider selector resolved once for the
         # pricing/budget gate in `resolve_request_context`. Route handlers
         # reuse this for dispatch instead of calling `resolve_provider_selector`
@@ -1319,10 +1323,46 @@ def _served_by_headers(
     # but a header cannot carry would fail the response after the provider answered.
     if model.isascii() and model.isprintable():
         headers[MODEL_HEADER] = model
-    return headers | {
-        ATTEMPT_COUNT_HEADER: str(sent),
-        FALLBACK_HEADER: "true" if fell_back else "false",
-        RESPONSE_DURATION_HEADER: str(_elapsed_ms(ctx.started_at)),
+    # One reading, so ``Server-Timing``'s ``total`` and the duration header end together.
+    now = time.monotonic()
+    return (
+        headers
+        | {
+            ATTEMPT_COUNT_HEADER: str(sent),
+            FALLBACK_HEADER: "true" if fell_back else "false",
+            RESPONSE_DURATION_HEADER: str(round((now - ctx.started_at) * 1000)),
+        }
+        | _server_timing(ctx, now)
+    )
+
+
+def _mark_dispatched(ctx: RequestContext) -> None:
+    """Note that the request is going to its first provider, unless an earlier attempt already went."""
+    if ctx.dispatched_at is None:
+        ctx.dispatched_at = time.monotonic()
+
+
+def _server_timing(ctx: RequestContext, now: float) -> dict[str, str]:
+    """``Server-Timing`` splitting the response's duration into the gateway's time and the provider's.
+
+    ``otari`` runs from the handler preamble to the first provider attempt: the
+    budget hold, routing, rate limits and preparing the call. ``upstream`` runs
+    from there to the provider's answer, or for a stream to its first chunk
+    within the first-chunk hold, fallbacks and in-loop gateway tools included. A
+    tool-loop stream is not held, so for one it ends when the stream opens. ``total``
+    is ``Otari-Response-Duration-Ms``. Empty when no attempt was timed.
+    """
+    if ctx.dispatched_at is None:
+        return {}
+    metrics = (
+        ("otari", ctx.dispatched_at - ctx.started_at, "Otari before the provider"),
+        ("upstream", now - ctx.dispatched_at, "Provider until its answer or first chunk"),
+        ("total", now - ctx.started_at, "Otari and the provider"),
+    )
+    return {
+        SERVER_TIMING_HEADER: ", ".join(
+            f'{name};dur={max(seconds, 0) * 1000:.1f};desc="{desc}"' for name, seconds, desc in metrics
+        )
     }
 
 
@@ -5765,6 +5805,7 @@ async def run_single_attempt_stream(
                 if attempt.position > 1:
                     await top_up_reservation_for_attempt(ctx, attempt)
                 served_tools = tool_ctx.for_candidate(attempt.provider.value, attempt.model)
+                _mark_dispatched(ctx)
                 return await open_stream(adapter=adapter, tool_ctx=served_tools, call_kwargs=attempt_kwargs)
 
             absorbed_rows: list[asyncio.Task[None]] = []
@@ -5813,6 +5854,7 @@ async def run_single_attempt_stream(
             served_by = _served_by_headers(ctx, provider, model, chosen, sent)
         else:
             call_kwargs = await _admitted_and_prepared(ctx, adapter, prepare_kwargs, provider, model, call_kwargs)
+            _mark_dispatched(ctx)
             stream = await open_stream(adapter=adapter, tool_ctx=tool_ctx, call_kwargs=call_kwargs)
             # A single-candidate policy still names a policy and a reason, and
             # both belong on the row.
@@ -6126,6 +6168,7 @@ async def run_non_stream(
                 if attempt.position > 1:
                     await top_up_reservation_for_attempt(ctx, attempt)
                 served_tools = tool_ctx.for_candidate(attempt.provider.value, attempt.model)
+                _mark_dispatched(ctx)
                 return await dispatch_non_stream(
                     adapter=adapter,
                     tool_ctx=served_tools,
@@ -6179,6 +6222,7 @@ async def run_non_stream(
             served_by = _served_by_headers(ctx, provider, model, chosen, sent)
         else:
             call_kwargs = await _admitted_and_prepared(ctx, adapter, prepare_kwargs, provider, model, call_kwargs)
+            _mark_dispatched(ctx)
             result = await dispatch_non_stream(adapter=adapter, tool_ctx=tool_ctx, call_kwargs=call_kwargs)
             # A single-candidate policy still has a name and a selection reason, and
             # both belong on the row: "served by its default target" is the answer to
