@@ -111,6 +111,7 @@ SPAN_ATTRIBUTES: Mapping[str, type] = {
     "otari.mcp.tool_count": int,
     "otari.tool_loop.round": int,
     "otari.harness.version": str,
+    "otari.llm.ttft_ms": int,
     "otari.tool.decision": str,
     "otari.tool.decision_source": str,
     "otari.tool.succeeded": bool,
@@ -127,6 +128,13 @@ SPAN_ATTRIBUTES: Mapping[str, type] = {
 # and each element is held to the identifier rule on its own.
 LIST_ATTRIBUTES = frozenset({"gen_ai.response.finish_reasons"})
 LIST_SEPARATOR = ","
+
+
+# What a span may say it was about, when a deployment keeps content
+# (``trace_content_enabled``). Prose, so never a typed field or an attribute,
+# and never searched: shown on the span, and only there.
+SPAN_CONTENT_KEYS = frozenset({"prompt", "command", "file_path", "gate.evidence", "gate.detail"})
+SPAN_CONTENT_MAX_LENGTH = 4_000
 
 
 class InvalidSpanError(ValueError):
@@ -209,6 +217,7 @@ class SpanRecord:
     otel_trace_id: str | None = None
     otel_span_id: str | None = None
     attributes: Mapping[str, str | int | float | bool] = field(default_factory=dict)
+    content: Mapping[str, str] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         _check_choice("kind", self.kind, SPAN_KINDS)
@@ -244,6 +253,15 @@ class SpanRecord:
             ):
                 raise InvalidSpanError(f"attribute {key} must be identifier-shaped")
         object.__setattr__(self, "attributes", MappingProxyType(attributes))
+        content = dict(self.content)
+        for key, value in content.items():
+            if key not in SPAN_CONTENT_KEYS:
+                raise InvalidSpanError("content may only hold its known keys")
+            if not isinstance(value, str) or len(value) > SPAN_CONTENT_MAX_LENGTH:
+                raise InvalidSpanError(
+                    f"content {key} must be a string of at most {SPAN_CONTENT_MAX_LENGTH} characters"
+                )
+        object.__setattr__(self, "content", MappingProxyType(content))
 
 
 @dataclass(frozen=True)
@@ -295,16 +313,26 @@ class TraceScope:
 
     workspace_ids: frozenset[uuid.UUID]
     deployment_wide: bool = False
+    # A span's retained content (prompts, commands) goes to whoever manages the
+    # workspaces and to the user the trace belongs to; anyone else reads it empty.
+    all_content: bool = False
+    content_user_id: str | None = None
 
     @classmethod
     def deployment(cls) -> "TraceScope":
         """Every workspace: only for a deployment operator."""
-        return cls(workspace_ids=frozenset(), deployment_wide=True)
+        return cls(workspace_ids=frozenset(), deployment_wide=True, all_content=True)
 
     @classmethod
-    def workspaces(cls, workspace_ids: frozenset[uuid.UUID]) -> "TraceScope":
-        """Only these workspaces."""
-        return cls(workspace_ids=workspace_ids)
+    def workspaces(
+        cls, workspace_ids: frozenset[uuid.UUID], *, all_content: bool = False, content_user_id: str | None = None
+    ) -> "TraceScope":
+        """Only these workspaces, with every trace's content or only ``content_user_id``'s own."""
+        return cls(workspace_ids=workspace_ids, all_content=all_content, content_user_id=content_user_id)
+
+    def reads_content_of(self, user_id: str | None) -> bool:
+        """Whether a read in this scope returns the content of a trace ``user_id`` owns."""
+        return self.all_content or (user_id is not None and user_id == self.content_user_id)
 
 
 @dataclass(frozen=True)
