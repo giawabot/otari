@@ -17079,6 +17079,21 @@
           "tpm": 200000
         },
         "properties": {
+          "budgets": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The budget IDs a `per: budget` rule counts, each on its own; unset counts every budget. Refused on any other rule.",
+            "title": "Budgets"
+          },
           "lease_sec": {
             "default": 900.0,
             "description": "How long a max_concurrent slot is held at most. A slot is given back when its response ends; this bounds what a process that dies mid-request keeps.",
@@ -17098,6 +17113,16 @@
             ],
             "description": "Requests in flight at once.",
             "title": "Max Concurrent"
+          },
+          "mode": {
+            "default": "enforce",
+            "description": "'enforce' (the default) refuses a request over the limit with 429. 'report' counts the same way but serves the request, naming the rule in the Otari-Rate-Limit-Exceeded response header, so a limit can be watched before it is enforced.",
+            "enum": [
+              "enforce",
+              "report"
+            ],
+            "title": "Mode",
+            "type": "string"
           },
           "models": {
             "anyOf": [
@@ -17126,7 +17151,8 @@
               "deployment",
               "key",
               "user",
-              "model"
+              "model",
+              "budget"
             ],
             "title": "Per",
             "type": "string"
@@ -17179,6 +17205,21 @@
         "additionalProperties": false,
         "description": "One rule in effect, and where it is defined.",
         "properties": {
+          "budgets": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The budget IDs a `per: budget` rule counts, each on its own; unset counts every budget. Refused on any other rule.",
+            "title": "Budgets"
+          },
           "lease_sec": {
             "default": 900.0,
             "description": "How long a max_concurrent slot is held at most. A slot is given back when its response ends; this bounds what a process that dies mid-request keeps.",
@@ -17198,6 +17239,16 @@
             ],
             "description": "Requests in flight at once.",
             "title": "Max Concurrent"
+          },
+          "mode": {
+            "default": "enforce",
+            "description": "'enforce' (the default) refuses a request over the limit with 429. 'report' counts the same way but serves the request, naming the rule in the Otari-Rate-Limit-Exceeded response header, so a limit can be watched before it is enforced.",
+            "enum": [
+              "enforce",
+              "report"
+            ],
+            "title": "Mode",
+            "type": "string"
           },
           "models": {
             "anyOf": [
@@ -17226,7 +17277,8 @@
               "deployment",
               "key",
               "user",
-              "model"
+              "model",
+              "budget"
             ],
             "title": "Per",
             "type": "string"
@@ -17305,6 +17357,21 @@
           "rpm": 1200
         },
         "properties": {
+          "budgets": {
+            "anyOf": [
+              {
+                "items": {
+                  "type": "string"
+                },
+                "type": "array"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The budget IDs a per: budget rule counts; null for every budget, and on any other rule.",
+            "title": "Budgets"
+          },
           "lease_sec": {
             "anyOf": [
               {
@@ -17331,6 +17398,22 @@
             "description": "Requests in flight at once.",
             "title": "Max Concurrent"
           },
+          "mode": {
+            "anyOf": [
+              {
+                "enum": [
+                  "enforce",
+                  "report"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "'enforce' refuses a request over the rule; 'report' serves it and names the rule.",
+            "title": "Mode"
+          },
           "models": {
             "anyOf": [
               {
@@ -17353,7 +17436,8 @@
                   "deployment",
                   "key",
                   "user",
-                  "model"
+                  "model",
+                  "budget"
                 ],
                 "type": "string"
               },
