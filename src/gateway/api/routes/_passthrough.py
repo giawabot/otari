@@ -50,6 +50,7 @@ from gateway.api.deps import (
     model_provider_port_on,
 )
 from gateway.api.request_id import set_request_id
+from gateway.api.routes._attempt_metrics import record_attempt
 from gateway.api.routes._attempts import classify_local_attempt_error
 from gateway.api.routes._helpers import resolve_user_id, with_retry_hint
 from gateway.api.routes._pipeline import (
@@ -710,9 +711,12 @@ async def run_passthrough(
         api_key_id=api_key_id,
     )
 
+    # Set once the provider has answered, so a later settlement failure is not counted as a failed attempt.
+    served = False
     try:
         require_declared_credential(config, resolved.instance, resolved.provider, resolved.kwargs)
         result = await call_provider(resolved)
+        served = True
 
         reported = billing.report(result)
         usage_log = _usage_row(
@@ -744,6 +748,15 @@ async def run_passthrough(
                 expects_cost=True,
                 savepoint=db.begin_nested,
             )
+        record_attempt(
+            resolved.instance,
+            resolved.model,
+            failed=False,
+            status_code=None,
+            fallback=False,
+            latency_ms=usage_log.latency_ms,
+            ttft_ms=None,
+        )
         await log_writer.put(usage_log)
         # The measured total, so a token ceiling counts this endpoint's traffic.
         # These paths hold no token estimate at admission (the estimate callback is
@@ -761,13 +774,22 @@ async def run_passthrough(
         raise
     except Exception as e:
         caller_params = frozenset(request_params) - SENSITIVE_PARAM_FIELDS
-        await log_writer.put(
-            _usage_row(
-                "error",
-                error_message=_stored_error_message(str(e)),
-                status_code=failure_status_code(e, request_params=caller_params),
-            )
+        failed_row = _usage_row(
+            "error",
+            error_message=_stored_error_message(str(e)),
+            status_code=failure_status_code(e, request_params=caller_params),
         )
+        if not served:
+            record_attempt(
+                resolved.instance,
+                resolved.model,
+                failed=True,
+                status_code=failed_row.status_code,
+                fallback=False,
+                latency_ms=failed_row.latency_ms,
+                ttft_ms=None,
+            )
+        await log_writer.put(failed_row)
         await refund_reservation(db, reservation)
 
         missing = missing_credential(e)
