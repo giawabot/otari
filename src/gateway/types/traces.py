@@ -25,7 +25,7 @@ import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal
 from types import MappingProxyType
 from typing import Literal
@@ -339,9 +339,10 @@ class TraceScope:
 class TraceFilter:
     """What narrows a read, inside its scope.
 
-    Every field narrows; an unset field does not filter. ``start`` is inclusive
-    and ``end`` exclusive, and both apply to a trace's last activity. A naive
-    bound means UTC. Several values in a tuple match any of them. ``workspace_ids``
+    Every field narrows; an unset field does not filter. ``start`` and ``end``
+    keep the traces active in ``[start, end)``: last active at or after ``start``
+    and started before ``end``, so a session still running past ``end`` stays in.
+    A naive bound means UTC. Several values in a tuple match any of them. ``workspace_ids``
     narrows inside the scope like every other field: a workspace outside the scope
     matches nothing, never widens it.
     """
@@ -393,13 +394,27 @@ class TraceSummary:
 
 
 # The grain a series is bucketed by. Bucket starts cross the seam as canonical UTC
-# strings (``YYYY-MM-DDTHH:00:00Z``), so two adapters cannot disagree about a bucket.
-TraceBucketGrain = Literal["hour", "day"]
+# strings (``YYYY-MM-DDTHH:MM:SSZ``), so two adapters cannot disagree about a bucket.
+TraceBucketGrain = Literal["1m", "5m", "30m", "hour", "6h", "day"]
+TRACE_BUCKET_DURATION: Mapping[str, timedelta] = MappingProxyType(
+    {
+        "1m": timedelta(minutes=1),
+        "5m": timedelta(minutes=5),
+        "30m": timedelta(minutes=30),
+        "hour": timedelta(hours=1),
+        "6h": timedelta(hours=6),
+        "day": timedelta(days=1),
+    }
+)
 
 
 @dataclass(frozen=True)
 class TraceBucket:
-    """How many traces started in one bucket, split by whether any of their spans failed unrecovered."""
+    """How many sessions were active in one bucket, split by whether any of their spans failed unrecovered.
+
+    A session is active in every bucket between its start and its last activity, so
+    a long one counts in each bucket it ran through, not only in the one it began in.
+    """
 
     bucket: str
     succeeded: int

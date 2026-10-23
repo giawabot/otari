@@ -257,6 +257,26 @@ async def test_search_pages_newest_activity_first_and_filters(
     assert windowed == 2
 
 
+async def test_a_window_lists_the_sessions_active_in_it_as_the_series_counts_them(
+    store: TraceService, tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    """A session still running past the window's end is listed, as the chart counts it."""
+    workspace, _ = tenants
+    await store.write(
+        (
+            _write(workspace, "spanning", _span("start", minutes=0), _span("later", minutes=30)),
+            _write(workspace, "before", _span("only", minutes=5)),
+            _write(workspace, "after", _span("only", minutes=20)),
+        )
+    )
+    window = TraceFilter(start=_T0 + timedelta(minutes=10), end=_T0 + timedelta(minutes=20))
+
+    page = await store.search(TraceScope.deployment(), window, limit=10, offset=0)
+
+    assert [item.trace_id for item in page.items] == ["spanning"]
+    assert await store.count(TraceScope.deployment(), window) == 1
+
+
 async def test_a_search_finds_any_part_of_the_id_harness_or_user_in_any_case(
     store: TraceService, tenants: tuple[uuid.UUID, uuid.UUID]
 ) -> None:
@@ -466,7 +486,37 @@ async def test_a_series_never_reads_traces_older_than_its_buckets_can_reach(
 
     assert [point.bucket for point in series] == ["2026-10-07T14:00:00Z", "2026-10-07T15:00:00Z"]
     [grouped] = statements
-    assert "started_at >=" in grouped
+    assert "last_activity_at >=" in grouped
+
+
+async def test_a_session_counts_in_every_bucket_it_was_active_in(
+    store: TraceService, tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    workspace, _ = tenants
+    await store.write(
+        (
+            _write(workspace, "long", _span("start", minutes=0), _span("later", minutes=35)),
+            _write(workspace, "short", _span("only", minutes=50, outcome="error")),
+        )
+    )
+
+    series = await store.series(TraceScope.deployment(), TraceFilter(), bucket="30m")
+
+    assert [(point.bucket, point.succeeded, point.failed) for point in series] == [
+        ("2026-10-07T12:00:00Z", 1, 0),
+        ("2026-10-07T12:30:00Z", 1, 1),
+    ]
+
+
+async def test_a_minute_series_is_aligned_to_the_minute(
+    store: TraceService, tenants: tuple[uuid.UUID, uuid.UUID]
+) -> None:
+    workspace, _ = tenants
+    await store.write((_write(workspace, "s", _span("a", minutes=3), _span("b", minutes=5)),))
+
+    series = await store.series(TraceScope.deployment(), TraceFilter(), bucket="1m")
+
+    assert [point.bucket for point in series] == [f"2026-10-07T12:0{minute}:00Z" for minute in (3, 4, 5)]
 
 
 async def test_a_series_fails_a_session_for_its_own_errors_and_not_its_tools(
