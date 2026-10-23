@@ -140,7 +140,15 @@ from gateway.services.tenancy.organization_guardrail_runner import (
     run_guardrail_runner_refresher,
 )
 from gateway.services.tool_settings_service import apply_overrides_from_db as apply_tool_overrides_from_db
-from gateway.services.tools import build_web_provider_client, register_builtin_fetcher, warn_about_tool_instances
+from gateway.services.tools import (
+    SANDBOX_KEY_ENV,
+    build_web_provider_client,
+    load_sandbox_credentials_at_startup,
+    register_builtin_fetcher,
+    reset_sandbox_credential_cache,
+    run_sandbox_credential_refresher,
+    warn_about_tool_instances,
+)
 from gateway.services.traces import RequestTraces, TraceWriter, stored_by
 from gateway.services.workspace_scope import default_workspace_id
 from gateway.version import __version__
@@ -468,6 +476,11 @@ _LIFESPAN_WORKERS: tuple[_LifespanWorker, ...] = (
     ),
     _LifespanWorker(
         "search tool", lambda config, _container: run_search_tool_refresher(config), reset_search_tool_cache
+    ),
+    _LifespanWorker(
+        "sandbox credential",
+        lambda _config, _container: run_sandbox_credential_refresher(),
+        reset_sandbox_credential_cache,
     ),
     # No reset: the stored rules live on the config, which the startup load rebuilds.
     _LifespanWorker("rate limit rule", lambda config, _container: run_rate_limit_refresher(config)),
@@ -901,6 +914,8 @@ def _create_lifespan() -> Callable[[FastAPI], Any]:
         # vendor handshake.
         await load_guardrail_runner_at_startup()
         await load_provider_endpoints_at_startup()
+        if config.effective_sandbox_provider() in SANDBOX_KEY_ENV:
+            await load_sandbox_credentials_at_startup(config.effective_sandbox_provider())
         await _move_deployment_providers(config)
         await _import_configured_providers(config)
         await load_hosted_names_at_startup(config)
