@@ -681,6 +681,7 @@ async def run_chat_completion(
                 workspace_id=ctx.workspace_id,
                 inputs=sandbox_inputs,
             ),
+            billing=billing,
         ),
     )
 
