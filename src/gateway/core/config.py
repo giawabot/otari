@@ -2104,6 +2104,39 @@ class GatewayConfig(
             return providers
         return {instance: ({} if entry is None else entry) for instance, entry in providers.items()}
 
+    @field_validator("providers", mode="after")
+    @classmethod
+    def _check_request_fields(cls, providers: dict[str, dict[str, Any]]) -> dict[str, dict[str, Any]]:
+        """Refuse a ``request_fields`` entry that names anything the gateway sets itself.
+
+        ``request_fields`` lists the extra chat request fields a caller may send this
+        instance's provider. One that shapes the request (``model``, ``messages``,
+        ``stream``) or that the gateway resolves (a credential, the base URL) would
+        land in the provider body over the gateway's own value, and one the request
+        already declares (a completion parameter, ``safety_identifier``) never
+        reaches the extras at all, so either is refused at load.
+        """
+        from any_llm.types.completion import CompletionParams
+
+        from gateway.core.provider_params import CHAT_GATEWAY_FIELDS, FORBIDDEN_ENDPOINT_DEFAULTS
+
+        reserved = FORBIDDEN_ENDPOINT_DEFAULTS | CHAT_GATEWAY_FIELDS | set(CompletionParams.model_fields)
+        for instance, entry in providers.items():
+            fields = entry.get("request_fields")
+            if fields is None:
+                continue
+            if not isinstance(fields, list) or not all(isinstance(name, str) and name for name in fields):
+                msg = f"providers.{instance}.request_fields must be a list of field names"
+                raise ValueError(msg)
+            clashing = sorted(set(fields) & reserved)
+            if clashing:
+                msg = (
+                    f"providers.{instance}.request_fields names {', '.join(clashing)}, which the gateway "
+                    "sets itself or a request already carries"
+                )
+                raise ValueError(msg)
+        return providers
+
     def effective_code_executor(self) -> CodeExecutor:
         """The deployment's answer to who runs a provider-named code-execution tool.
 
