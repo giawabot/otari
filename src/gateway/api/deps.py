@@ -129,8 +129,10 @@ from gateway.services.tenancy.org_provider_key_service import OrgProviderKeyServ
 from gateway.services.tenancy.organization_guardrail_definition_service import (
     OrganizationGuardrailDefinitionService,
 )
+from gateway.services.tenancy.organization_guardrail_service import OrganizationGuardrailService
 from gateway.services.tenancy.provisioning_service import ensure_bootstrap_identity
-from gateway.services.tenancy.workspace_mcp_server_service import WorkspaceMcpServers
+from gateway.services.tenancy.workspace_activation_service import WorkspaceActivationService
+from gateway.services.tenancy.workspace_mcp_server_service import WorkspaceMcpServers, WorkspaceMcpServerService
 from gateway.services.tenancy.workspace_service import WorkspaceService
 from gateway.services.tenancy.workspace_web_search_service import WorkspaceWebSearchPolicies, WorkspaceWebSearchService
 from gateway.services.tools import (
@@ -1296,7 +1298,7 @@ def get_overview_service(
         OrganizationService(db, membership_listener=None),
         DeploymentUserService(db),
         # The listener is for writes; this service only reads, and the same
-        # pairing is what `routes/workspaces.py` builds.
+        # pairing is what `get_workspace_service` builds.
         WorkspaceService(db, uow=uow, membership_listener=membership_listener),
     )
 
@@ -1484,6 +1486,49 @@ IdentityProviderPortDep = Annotated[IdentityProviderPort, Depends(get_identity_p
 WorkspaceMcpServersDep = Annotated[WorkspaceMcpServers, Depends(get_workspace_mcp_servers)]
 ModelProviderPortDep = Annotated[ModelProviderPort, Depends(get_model_provider_port)]
 RequestSessionModelProviderPortDep = Annotated[ModelProviderPort, Depends(get_request_session_model_provider_port)]
+
+
+def get_workspace_service(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    uow: UnitOfWorkDep,
+    membership_listener: MembershipListenerDep,
+) -> WorkspaceService:
+    return WorkspaceService(db, uow=uow, membership_listener=membership_listener)
+
+
+WorkspaceServiceDep = Annotated[WorkspaceService, Depends(get_workspace_service)]
+
+
+def get_workspace_activation_service(
+    db: Annotated[AsyncSession, Depends(get_db)],
+    config: Annotated[GatewayConfig, Depends(get_config)],
+    key_format: ApiKeyFormatPortDep,
+) -> WorkspaceActivationService:
+    return WorkspaceActivationService(db, config, key_format)
+
+
+WorkspaceActivationServiceDep = Annotated[WorkspaceActivationService, Depends(get_workspace_activation_service)]
+
+
+def get_workspace_mcp_server_service(db: Annotated[AsyncSession, Depends(get_db)]) -> WorkspaceMcpServerService:
+    return WorkspaceMcpServerService(db)
+
+
+WorkspaceMcpServerServiceDep = Annotated[WorkspaceMcpServerService, Depends(get_workspace_mcp_server_service)]
+
+
+def get_org_provider_key_service(db: Annotated[AsyncSession, Depends(get_db)]) -> OrgProviderKeyService:
+    return OrgProviderKeyService(db)
+
+
+OrgProviderKeyServiceDep = Annotated[OrgProviderKeyService, Depends(get_org_provider_key_service)]
+
+
+def get_organization_guardrail_service(db: Annotated[AsyncSession, Depends(get_db)]) -> OrganizationGuardrailService:
+    return OrganizationGuardrailService(db)
+
+
+OrganizationGuardrailServiceDep = Annotated[OrganizationGuardrailService, Depends(get_organization_guardrail_service)]
 
 
 def get_identity_service(
