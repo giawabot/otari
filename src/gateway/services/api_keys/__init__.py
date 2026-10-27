@@ -10,7 +10,7 @@ from gateway.services.api_keys._access_tokens import (
     mint_access_token,
     read_access_token,
 )
-from gateway.services.api_keys._admission import key_refusal
+from gateway.services.api_keys._admission import key_refusal, operator_set_active, owner_enable_refusal
 from gateway.services.api_keys._federation import (
     FederatedIdentity,
     FederatedTokenVerifier,
@@ -21,6 +21,7 @@ from gateway.services.api_keys._federation import (
     rule_matches,
     unverified_issuer,
 )
+from gateway.services.api_keys._membership import ApiKeyMembershipListener
 from gateway.services.api_keys._secrets import declared_secret_problem, refuse_unusable_declared_secrets
 from gateway.services.api_keys._service import ApiKeyService
 from gateway.services.api_keys._token_exchange import FederationTokenExchange, OrganizationOfWorkspace
@@ -28,6 +29,7 @@ from gateway.services.api_keys._token_exchange import FederationTokenExchange, O
 __all__ = [
     "JWT_BEARER_GRANT",
     "AccessTokenClaims",
+    "ApiKeyMembershipListener",
     "ApiKeyService",
     "FederatedIdentity",
     "FederatedTokenVerifier",
@@ -44,6 +46,8 @@ __all__ = [
     "key_refusal",
     "match_federation_rules",
     "mint_access_token",
+    "operator_set_active",
+    "owner_enable_refusal",
     "read_access_token",
     "refuse_unusable_declared_secrets",
     "rule_matches",

@@ -73,6 +73,7 @@ from gateway.repositories.traces import TracesRepositories
 from gateway.repositories.usage_and_telemetry import UsageLogRepository
 from gateway.repositories.users_repository import get_active_user
 from gateway.services.api_keys import (
+    ApiKeyMembershipListener,
     ApiKeyService,
     FederatedTokenVerifier,
     FederationRefusedError,
@@ -119,13 +120,14 @@ from gateway.services.secret_box import configured_secret_keys
 from gateway.services.tenancy import (
     DomainAutoJoinListener,
     InvitationClaimSettings,
+    MembershipListener,
+    MembershipListeners,
     OrganizationDomainService,
     OrganizationService,
     organization_guardrail_runner,
 )
 from gateway.services.tenancy.authorization import WorkspaceAccess, resolve_visible_workspace_scope
 from gateway.services.tenancy.deployment_user_service import DeploymentUserService
-from gateway.services.tenancy.membership_listener import MembershipListener
 from gateway.services.tenancy.org_provider_key_service import OrgProviderKeyService, refresh_org_provider_cache
 from gateway.services.tenancy.organization_guardrail_definition_service import (
     OrganizationGuardrailDefinitionService,
@@ -987,11 +989,14 @@ UnitOfWorkDep = Annotated[UnitOfWork, Depends(get_unit_of_work)]
 
 
 def get_membership_listener(uow: UnitOfWorkDep) -> MembershipListener:
-    """Return the listener that keeps members' budget ceilings in step with their memberships.
+    """Return the listener that keeps members' budget ceilings and own keys in step with their memberships.
 
     It writes through the request's Unit of Work, so a service that changes membership must be built on the same one.
     """
-    return BudgetMembershipListener(BudgetRepositories.on(uow))
+    return MembershipListeners(
+        BudgetMembershipListener(BudgetRepositories.on(uow)),
+        ApiKeyMembershipListener(ApiKeyRepositories.on(uow)),
+    )
 
 
 MembershipListenerDep = Annotated[MembershipListener, Depends(get_membership_listener)]
