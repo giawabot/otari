@@ -7,12 +7,50 @@ their timing and cost. An LLM call is one kind of span among several, so a trace
 answers what an agent run did and cost, not only what one call did.
 
 No prompt, model output or tool content is recorded. A trace holds names, ids,
-timings, token counts, outcomes and costs.
+timings, token counts, sizes, outcomes and costs. The sizes are numbers only,
+described under [The context map](#the-context-map).
 
 An LLM call's input tokens are its whole prompt, cached tokens included,
 whichever way its provider reports them. Beside them the call keeps how many
 input tokens were read from or written to the prompt cache, and how many output
 tokens went to reasoning.
+
+## The context map
+
+A session's **At a glance**, shown before a span is picked, maps what fills the
+model's context window, as blocks sized by tokens, with the unused part of the
+window as **Free**. It is read from the session's last LLM call that recorded
+input, since each call carries the whole conversation so far, and it also names
+the fullest call when that was an earlier one. Hover, focus or tap a block for its
+tokens and share of the window. The window comes from the model catalog when the
+model is listed there. Without it the map shows no free space and says the
+window is unknown. The total is always the provider's exact input-token count.
+How it is split depends on what the call recorded:
+
+- **Every call**, including those a coding agent exports over OTLP, is split into
+  cache reads, cache writes and fresh input, from the cache counts the call
+  already keeps.
+- **A request Otari served itself** (chat completions, Messages or Responses) is
+  also split into the system prompt, tool definitions, files, messages and tool
+  results. Otari has no tokenizer, so it counts characters per part as the
+  request arrives, and the dashboard scales those weights so they add up to the
+  exact input tokens. The split is an estimate and the map says so. An image,
+  audio clip, file or document counts for a flat allowance of 4,000 characters
+  (about 1,000 tokens), because those are billed by size and format rather than
+  by bytes. Tokens the provider adds itself, such as a hidden tool prompt, are
+  spread across the parts.
+
+For that estimate a span keeps eight whole numbers, never text: the characters
+in the system prompt, the tool definitions, the user messages, the assistant
+messages, the tool results and the files, and the number of tool definitions and
+of messages. They are stored as the span attributes
+`otari.context.system_chars`, `otari.context.tools_chars`,
+`otari.context.user_chars`, `otari.context.assistant_chars`,
+`otari.context.tool_result_chars`, `otari.context.file_chars`,
+`otari.context.tool_count` and `otari.context.message_count`. Every attempt of a
+request, a fallback included, carries the same numbers, and turning trace
+capture off stores none. A request that runs a tool loop inside the gateway
+reports the sizes of the request as it arrived, not of each later round.
 
 ## What makes a session
 
@@ -173,14 +211,16 @@ not what was charged.
 
 A session's header counts its tool calls and the gates its hooks ran, each
 broken down on hover: the calls by tool, and the gates by what they decided.
-**At a glance** opens a session with what it did and where its time and money
-went: its turns, model requests and tool calls, then one bar for its time and
-one for its cost, each with a row per part.
+**At a glance** opens a session with where its time and money went: how long
+it took, with its turns and tool calls, and what it cost, with its requests and
+tokens, each above one bar and a figure per part. Below them, what fills the
+model's context window (see [The context map](#the-context-map)), then the gates
+its hooks ran and what they decided.
 
 - **Time** splits the session into model requests, hooks, running tools,
   waiting for you to approve a call, and idle between turns. When idle is more
-  than half the session, the bar draws it shorter, marked `//`, and its row
-  keeps the true time and share. Running tools opens onto each tool's calls and
+  than half the session, the bar draws it shorter, marked `//`, and its figure
+  keeps the true time. Running tools opens onto each tool's calls and
   running time. A call that started a subagent runs until the subagent's last
   span, so its time also counts as model time, and the panel says when parts
   overlap like that. Tools that ran inside the request that called them, as a
@@ -190,8 +230,8 @@ one for its cost, each with a row per part.
 - **Cost** is the session's total, split by meter (fresh input, output, cache
   reads and cache writes) when the requests were priced by the token, with what
   reading from the cache saved over paying for those tokens as fresh input.
-  Requests priced whole, as a gateway prices a routed request, are split by
-  model instead. A session with nothing priced says so rather than $0.00.
+  Requests priced whole, as a gateway prices a routed request, have no split.
+  A session with nothing priced says so rather than $0.00.
 
 A judge gate that [reports its model calls](agent-guardrails.md#reporting-to-otari)
 is priced like a request and counted in the session's cost, though not in any

@@ -87,10 +87,10 @@ async function openFirstSession(user: Pick<UserEvent, "click"> = userEvent) {
   return screen.findByRole("complementary", { name: "Trace claude-code" })
 }
 
-// The total At a glance heads its Cost block with.
+// The total At a glance heads its Cost band with.
 async function costTotal(peek: HTMLElement) {
-  const heading = await within(peek).findByRole("heading", { name: "Cost" })
-  return heading.nextElementSibling?.textContent
+  const heading = await within(peek).findByRole("heading", { name: /^Cost / })
+  return heading.lastElementChild?.textContent
 }
 
 describe("SessionsPage", () => {
@@ -262,6 +262,105 @@ describe("SessionsPage", () => {
     expect(within(peek).getByText("48,210 (41,900 cached)")).toBeInTheDocument()
     expect(within(peek).getByText("Cache write tokens")).toBeInTheDocument()
     expect(within(peek).getByText("Reasoning tokens")).toBeInTheDocument()
+  })
+
+  it("maps at a glance what fills the session's context window", async () => {
+    const detail = traceDetail()
+    const spans = detail.spans.map((span) =>
+      span.span_id === "llm-1"
+        ? {
+            ...span,
+            model: "claude-sonnet-4-5",
+            input_tokens: 39_600,
+            context_window: 200_000,
+            attributes: {
+              "otari.context.system_chars": 4_000,
+              "otari.context.tools_chars": 12_000,
+              "otari.context.user_chars": 3_000,
+              "otari.context.assistant_chars": 5_000,
+              "otari.context.tool_result_chars": 30_000,
+              "otari.context.file_chars": 4_000,
+              "otari.context.tool_count": 12,
+              "otari.context.message_count": 41,
+            },
+          }
+        : span,
+    )
+    mockApi({ traces: [traceSummary()], traceDetail: { ...detail, spans } })
+
+    renderPage(<SessionsPage />, "/sessions")
+    const peek = await openFirstSession()
+    const context = await within(peek).findByRole("region", {
+      name: "Context",
+    })
+
+    expect(within(context).getByText("39.6k / 200k")).toBeInTheDocument()
+    expect(within(context).getByText("20% full")).toBeInTheDocument()
+    expect(
+      within(context).queryByText(/claude-sonnet-4-5/),
+    ).not.toBeInTheDocument()
+    expect(
+      within(context).getByRole("button", {
+        name: /^Tool definitions: .*12 tool definitions/,
+      }),
+    ).toBeInTheDocument()
+    expect(
+      within(context).getByRole("button", { name: /^Free:/ }),
+    ).toBeInTheDocument()
+    expect(
+      within(context).getByText(
+        "From the session's only request. The split is estimated from its size; the total is exact.",
+      ),
+    ).toBeInTheDocument()
+  })
+
+  it("falls back to the cache split at a glance, and gives a model request no Context tab", async () => {
+    const detail = traceDetail()
+    const spans = detail.spans.map((span) =>
+      span.span_id === "llm-1"
+        ? {
+            ...span,
+            input_tokens: 1_000,
+            cache_read_tokens: 600,
+            context_window: null,
+          }
+        : span,
+    )
+    mockApi({ traces: [traceSummary()], traceDetail: { ...detail, spans } })
+
+    renderPage(<SessionsPage />, "/sessions")
+    const peek = await openFirstSession()
+    const context = await within(peek).findByRole("region", {
+      name: "Context",
+    })
+
+    expect(within(context).getByText("1.0k")).toBeInTheDocument()
+    // Said once, under the map, rather than also beside the total.
+    expect(
+      within(context).queryByText("Window unknown"),
+    ).not.toBeInTheDocument()
+    expect(
+      within(context).getByText(
+        /window is unknown, so free space is not shown/,
+      ),
+    ).toBeInTheDocument()
+    expect(
+      within(context).getByRole("button", { name: /^Cache read:/ }),
+    ).toBeInTheDocument()
+    expect(
+      within(context).getByText(
+        /The split is the provider's own\..*window is unknown/,
+      ),
+    ).toBeInTheDocument()
+    await userEvent.click(
+      within(peek).getAllByRole("button", { name: /^Generation, gpt-5/ })[0],
+    )
+    expect(
+      await within(peek).findByRole("button", { name: "Attributes" }),
+    ).toBeInTheDocument()
+    expect(
+      within(peek).queryByRole("button", { name: "Context" }),
+    ).not.toBeInTheDocument()
   })
 
   it("opens the span a gateway decision is about", async () => {
@@ -473,9 +572,7 @@ describe("SessionsPage", () => {
       within(peek).getByRole("button", { name: /^\d+ tool calls?$/ }),
     ).toBeInTheDocument()
     expect(
-      within(peek).getByText(
-        /^\d+ turns?, \d+ model requests? and \d+ tool calls?/,
-      ),
+      within(peek).getByText(/^\d+ turns? · \d+ tool calls?/),
     ).toBeInTheDocument()
     expect(within(peek).getByText("Running tools")).toBeInTheDocument()
   })
@@ -547,7 +644,7 @@ describe("SessionsPage", () => {
 
     expect(
       await within(peek).findByText(
-        /^Judge gates called claude-haiku-4-5-20251001 once, for \$0\.01\d* the split above leaves out\./,
+        /^Judge gates made 1 model call, for \$0\.01\d*\.$/,
       ),
     ).toBeInTheDocument()
     await userEvent.click(

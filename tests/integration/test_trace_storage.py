@@ -36,6 +36,11 @@ from gateway.services.traces._collector import call_id_digest
 from gateway.types.traces import SpanRecord, TraceFilter, TraceScope, TraceWrite
 from otari_agent.domain.definitions import GateDefinition, definition_digest
 
+
+def _no_window(provider: str | None, model: str) -> int | None:
+    return None
+
+
 pytestmark = pytest.mark.asyncio
 
 _T0 = datetime(2026, 10, 7, 12, 0, tzinfo=UTC)
@@ -46,7 +51,7 @@ async def store(test_config: GatewayConfig, clean_database: None) -> AsyncIterat
     init_db(test_config)
     try:
         async with create_unit_of_work() as uow:
-            yield TraceService(uow, TracesRepositories.on(uow))
+            yield TraceService(uow, TracesRepositories.on(uow), _no_window)
     finally:
         await dispose_db()
 
@@ -457,7 +462,7 @@ async def test_two_writers_sharing_traces_in_opposite_order_do_not_deadlock(
 
     async def write(order: list[str], tag: str) -> None:
         async with create_unit_of_work() as uow:
-            await TraceService(uow, TracesRepositories.on(uow)).write(
+            await TraceService(uow, TracesRepositories.on(uow), _no_window).write(
                 tuple(_write(workspace, trace_id, _span(f"{tag}-{trace_id}")) for trace_id in order)
             )
 
@@ -668,7 +673,7 @@ async def test_concurrent_new_guardrail_versions_never_pass_the_workspace_cap(
         version = gates(f"version {index}")
         async with create_unit_of_work() as uow:
             try:
-                await TraceService(uow, TracesRepositories.on(uow)).record_definition(
+                await TraceService(uow, TracesRepositories.on(uow), _no_window).record_definition(
                     workspace, version, definition_digest(version)
                 )
             except GuardrailVersionLimitError:
