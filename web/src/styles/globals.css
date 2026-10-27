@@ -2670,6 +2670,52 @@ main {
 .otari-trace-mark--selected {
   outline: 1px solid var(--color-text);
 }
+/* A tree row a live session adds while the panel is open: its contents, connectors
+   included, fade and rise into place while a wash fades from the row, so the eye
+   finds what just happened. The wash is a layer under the row's contents whose
+   opacity fades, so it stays on the compositor, and it outlasts the entrance
+   because it is what the eye follows. It starts lighter than the selected row's
+   fill so an arrival never reads as a selection. `backwards` holds both at their
+   start through the stagger delay. */
+.otari-trace-arrive {
+  position: relative;
+  isolation: isolate;
+}
+.otari-trace-arrive::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  pointer-events: none;
+  background-color: color-mix(
+    in oklab,
+    var(--color-primary-subtle) 60%,
+    transparent
+  );
+  opacity: 0;
+  animation: otari-trace-wash 600ms ease-out var(--arrive-delay, 0ms) backwards;
+}
+.otari-trace-arrive > * {
+  animation: otari-trace-rise 250ms var(--ease-out-fluid)
+    var(--arrive-delay, 0ms) backwards;
+}
+@keyframes otari-trace-wash {
+  from {
+    opacity: 1;
+  }
+}
+@keyframes otari-trace-rise {
+  from {
+    opacity: 0;
+    translate: 0 0.25rem;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .otari-trace-arrive::before,
+  .otari-trace-arrive > * {
+    animation: none;
+  }
+}
 .otari-mcp-table .table__row .table__cell {
   height: 3.25rem;
   padding-block: 0;
