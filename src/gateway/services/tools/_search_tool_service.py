@@ -354,8 +354,8 @@ class SearchToolService:
         async with self.uow:
             return await self._reload_stored_tools()
 
-    async def load_at_startup(self) -> None:
-        """Prime the overlay so the first request does not race the first refresh.
+    async def load_at_startup(self) -> bool:
+        """Prime the overlay so the first request does not race the first refresh, and return whether it did.
 
         A failure here is logged and the start goes on: stored tools are an
         addition to the config ones, and a gateway that serves every config-file
@@ -365,19 +365,24 @@ class SearchToolService:
         reset_search_tool_cache()
         try:
             async with self.uow:
-                shadowed = apply_at_startup(self.config, await self.tools.list_committed())
-                record_read_settings(await self.read_settings())
+                rows = await self.tools.list_committed()
+                overrides = await self.read_settings()
+            shadowed = apply_at_startup(self.config, rows)
+            record_read_settings(overrides)
         except DATABASE_ERRORS as exc:
             # By class only: a database error's message can carry the row it read.
             logger.error(
                 "Failed to load stored search tools (%s); continuing with config search tools only",
                 describe_database_error(exc),
             )
-            shadowed = set()
+            report_startup(self.config, set())
+            return False
         except Exception:
             logger.exception("Failed to load stored search tools; continuing with config search tools only")
-            shadowed = set()
+            report_startup(self.config, set())
+            return False
         report_startup(self.config, shadowed)
+        return True
 
     async def instance_to_test(self, name: str) -> tuple[ToolInstance, Mapping[str, Any]]:
         """The configured or stored instance called ``name``, after reloading the rows another replica may have stored.
