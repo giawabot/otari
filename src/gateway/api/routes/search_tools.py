@@ -297,6 +297,12 @@ async def create_search_tool(
     if await get_search_tool(db, name) is not None:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=conflict)
     pinned = default_to_pin(config, name, stored_names=stored_tool_names()) if kind == "search" else None
+    if pinned is not None:
+        # The default's row can collide too, with another create pinning at the same time.
+        conflict = (
+            f"'{name}' was not stored: a stored tool of that name exists, or another create changed the "
+            "search instances at the same time. Reload and retry."
+        )
     try:
         row = await save_search_tool(
             db,
@@ -313,13 +319,13 @@ async def create_search_tool(
             await stage_override(db, WEB_SEARCH_DEFAULT_TOOL, pinned.name)
     except SecretBoxUnavailableError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    except IntegrityError:
+        # A concurrent create can slip past the pre-check and collide on the
+        # primary key, which is the create's 409.
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=conflict) from None
+    except DATABASE_ERRORS as exc:
+        raise database_error("create search tool", exc) from None
 
-    if pinned is not None:
-        # The default's row can collide too, with another create pinning at the same time.
-        conflict = (
-            f"'{name}' was not stored: a stored tool of that name exists, or another create changed the "
-            "search instances at the same time. Reload and retry."
-        )
     await _commit(db, "create search tool", conflict_detail=conflict)
     if pinned is not None:
         apply_override(config, WEB_SEARCH_DEFAULT_TOOL, pinned.name)
@@ -333,7 +339,6 @@ async def create_search_tool(
             name,
         )
     await _apply_write(db, config, name)
-    await db.refresh(row)
     return CreatedSearchToolSchema(
         **row.to_public_dict(),
         shadows_config=shadows_config,
@@ -423,10 +428,11 @@ async def update_search_tool(
         )
     except SecretBoxUnavailableError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from None
+    except DATABASE_ERRORS as exc:
+        raise database_error("update search tool", exc) from None
 
     await _commit(db, "update search tool")
     await _apply_write(db, config, name)
-    await db.refresh(row)
     from_config = config_file_tools(config, kind)
     return StoredSearchToolSchema.from_model(row, shadows_config=name in from_config)
 
@@ -438,7 +444,11 @@ async def delete_stored_search_tool(
     config: Annotated[GatewayConfig, Depends(get_config)],
 ) -> None:
     """Delete a stored search or fetch instance. A config-file one, or ``builtin_fetch``, cannot be deleted here."""
-    if not await delete_search_tool(db, name):
+    try:
+        deleted = await delete_search_tool(db, name)
+    except DATABASE_ERRORS as exc:
+        raise database_error("delete stored search tool", exc) from None
+    if not deleted:
         detail = f"No stored search tool '{name}'."
         if name in config_file_search_tools(config):
             detail = f"Search tool '{name}' is defined in the config file and cannot be deleted through the API."
