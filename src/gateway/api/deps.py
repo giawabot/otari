@@ -16,7 +16,7 @@ from gateway.container import Container
 from gateway.core.config import API_KEY_HEADER, API_ROOT, X_API_KEY_HEADER, GatewayConfig
 from gateway.core.database import DATABASE_ERRORS, create_session, describe_database_error, get_db, release_session
 from gateway.core.feature import CoreFeature
-from gateway.core.unit_of_work import UnitOfWork, create_unit_of_work
+from gateway.core.unit_of_work import UnitOfWork, create_unit_of_work, create_unit_of_work_with_session
 from gateway.exceptions.identity_exceptions import DeploymentAdministrationUnavailableError
 from gateway.exceptions.traces_exceptions import TraceBreakGlassForbiddenError, TraceBreakGlassUnnamedError
 from gateway.log_config import logger
@@ -1771,6 +1771,32 @@ def get_search_tool_service(
 SearchToolServiceDep = Annotated[SearchToolService, Depends(get_search_tool_service)]
 
 
+async def get_search_tool_tester(
+    uow: UnitOfWorkDep,
+    db: Annotated[AsyncSession, Depends(get_db)],
+    config: Annotated[GatewayConfig, Depends(get_config)],
+) -> SearchToolService:
+    """Build the search-tool service for a connection test, once authentication's database work has ended.
+
+    A test calls a provider, so no pooled connection is held across the call.
+    """
+    await release_session(db)
+    return build_search_tool_service(uow, db, config=config)
+
+
+SearchToolTesterDep = Annotated[SearchToolService, Depends(get_search_tool_tester)]
+
+
+def build_search_tool_refresh(config: GatewayConfig) -> Callable[[], Awaitable[set[str]]]:
+    """Build the search-tool refresher's tick, each on a unit of work of its own."""
+
+    async def refresh() -> set[str]:
+        async with create_unit_of_work_with_session() as (session, uow):
+            return await build_search_tool_service(uow, session, config=config).refresh()
+
+    return refresh
+
+
 def build_hosted_discovery(config: GatewayConfig) -> HostedDiscovery:
     """Build the discovery worker's read of the hosted providers' dials.
 
@@ -2322,6 +2348,7 @@ __all__ = [
     "ModelProviderPortDep",
     "HostedProviderServiceDep",
     "SearchToolServiceDep",
+    "SearchToolTesterDep",
     "OrgProviderModelServiceDep",
     "RateLimitServiceDep",
     "HealthCheckServiceDep",
