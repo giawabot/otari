@@ -37,6 +37,24 @@ For PostgreSQL, set `NORTHROUTER_DATABASE_URL` to its Otari database URL. The
 overlay uses a separate `nr_alembic_version` table and leaves Otari's migration
 history untouched.
 
+Migration `0003_billing_hardening` adds unique constraints on `(org_id, reference)`
+in `nr_e_transfers` and `stripe_customer_id` in `nr_orgs`. It will fail on
+databases that already hold duplicate e-transfer references or duplicate
+`stripe_customer_id` rows. Run these pre-check queries before upgrading:
+
+```sql
+SELECT org_id, reference, COUNT(*)
+FROM nr_e_transfers
+GROUP BY org_id, reference
+HAVING COUNT(*) > 1;
+
+SELECT stripe_customer_id, COUNT(*)
+FROM nr_orgs
+WHERE stripe_customer_id IS NOT NULL
+GROUP BY stripe_customer_id
+HAVING COUNT(*) > 1;
+```
+
 ## Route surface (plan 03's contract)
 
 All routes mount under `/api/v1/nr/billing`, gated on the

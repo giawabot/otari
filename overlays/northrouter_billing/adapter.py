@@ -6,10 +6,11 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import case, func, or_, select, update
+from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 from gateway.ports.billing_port import BilledModel, BillingPort, InsufficientFundsError, ToolUse
 from northrouter_billing.models import NrHold, NrLedgerEntry, NrOrg, NrSubscription, _money
@@ -19,6 +20,14 @@ _PAID_IN_TYPES = ("grant", "refund", "invoice")
 # release must not strand funds forever.
 _HOLD_TTL = timedelta(hours=1)
 _SUSPENDED_MESSAGE = "This organization is suspended; sign in at northrouter.ca to review your account details."
+
+
+def _expired_condition(now: datetime) -> ColumnElement[bool]:
+    """Predicate matching open holds whose expiration window has elapsed."""
+    return or_(
+        and_(NrHold.expires_at.is_(None), NrHold.created_at <= now - _HOLD_TTL),
+        NrHold.expires_at <= now,
+    )
 
 
 async def _insert_if_absent(
@@ -81,11 +90,12 @@ class NorthRouterBillingAdapter(BillingPort):
                 NrLedgerEntry.org_id == org_id, NrLedgerEntry.type == "consume"
             )
         )
+        now = datetime.now(UTC)
         held = await session.scalar(
             select(func.coalesce(func.sum(NrHold.amount), 0)).where(
                 NrHold.org_id == org_id,
                 NrHold.state == "open",
-                or_(NrHold.expires_at.is_(None), NrHold.expires_at > datetime.now(UTC)),
+                ~_expired_condition(now),
             )
         )
         return _money(paid_in or 0), _money(consumed or 0), _money(held or 0)
@@ -102,6 +112,8 @@ class NorthRouterBillingAdapter(BillingPort):
 
     async def apply_due_credit(self, *, organization_id: uuid.UUID) -> None:
         org = await self._org(organization_id)
+        if org.status != "active":
+            return
         session = self._session()
         subscriptions = await session.scalars(
             select(NrSubscription).where(
@@ -217,6 +229,8 @@ class NorthRouterBillingAdapter(BillingPort):
 
     async def release_hold(self, *, organization_id: uuid.UUID, amount: Decimal) -> None:
         amount = _money(amount)
+        if amount <= 0:
+            return
         org = await self._org(organization_id)
         session = self._session()
         now = datetime.now(UTC)
@@ -227,7 +241,7 @@ class NorthRouterBillingAdapter(BillingPort):
                 NrHold.amount == amount,
                 NrHold.state == "open",
             )
-            .order_by(case((NrHold.expires_at <= now, 1), else_=0), NrHold.created_at, NrHold.id)
+            .order_by(case((_expired_condition(now), 1), else_=0), NrHold.created_at, NrHold.id)
             .limit(1)
             .with_for_update(skip_locked=True)
         )
@@ -249,6 +263,7 @@ class NorthRouterBillingAdapter(BillingPort):
         actor_user_id: uuid.UUID | None = None,
         api_key_id: str | None = None,
     ) -> None:
+        amount = _money(amount)
         if amount < 0:
             raise ValueError("A charge amount cannot be negative")
         org = await self._org(organization_id)
@@ -270,7 +285,7 @@ class NorthRouterBillingAdapter(BillingPort):
             NrLedgerEntry(
                 org_id=org.id,
                 type="consume",
-                amount=_money(amount),
+                amount=amount,
                 ref=f"charge:{uuid.uuid4()}",
                 description=description,
                 actor_user_id=actor_user_id,

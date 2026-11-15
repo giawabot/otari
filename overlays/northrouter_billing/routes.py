@@ -9,9 +9,10 @@ from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Any, Literal
 
+import stripe
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import and_, func, or_, select, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.exc import IntegrityError
@@ -21,7 +22,7 @@ from gateway.api.deps import get_db, verify_api_key_or_master_key
 from gateway.core.database import release_session
 from gateway.models.api_keys import APIKey
 from gateway.models.tenancy import Workspace
-from northrouter_billing.adapter import _HOLD_TTL, NorthRouterBillingAdapter
+from northrouter_billing.adapter import NorthRouterBillingAdapter, _expired_condition
 from northrouter_billing.models import NrETransfer, NrHold, NrLedgerEntry, NrOrg, NrSubscription, NrWebhookEvent, _money
 from northrouter_billing.stripe_client import StripeClient
 
@@ -72,25 +73,52 @@ async def _ensure_org(db: AsyncSession, organization_id: uuid.UUID) -> NrOrg:
     return await adapter._org(organization_id)
 
 
+async def _call_stripe(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+    try:
+        return await asyncio.to_thread(func, *args, **kwargs)
+    except (stripe.CardError, stripe.InvalidRequestError) as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Stripe rejected the request") from exc
+    except stripe.IdempotencyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT, detail="Conflicting idempotent Stripe request"
+        ) from exc
+    except stripe.StripeError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="Stripe service error") from exc
+
+
 async def _ensure_stripe_customer(
     db: AsyncSession,
     org: NrOrg,
     organization_id: uuid.UUID,
     stripe_client: StripeClient,
 ) -> str:
-    if org.stripe_customer_id is not None:
-        return org.stripe_customer_id
-    released = await release_session(db)
-    customer = await asyncio.to_thread(
+    existing_customer_id = org.stripe_customer_id
+    if existing_customer_id is not None:
+        await release_session(db)
+        return existing_customer_id
+    org_pk = org.id
+    org_uuid = organization_id
+    await release_session(db)
+    customer = await _call_stripe(
         stripe_client.create_customer,
-        organization_id=str(organization_id),
-        idempotency_key=f"nr-org-{org.id}",
+        organization_id=str(org_uuid),
+        idempotency_key=f"nr-org-{org_uuid}",
     )
-    if not released:
-        org = await _ensure_org(db, organization_id)
-    org.stripe_customer_id = str(_read(customer, "id"))
+    new_customer_id = str(_read(customer, "id"))
+    await db.execute(
+        update(NrOrg)
+        .where(NrOrg.otari_org_id == org_uuid, NrOrg.stripe_customer_id.is_(None))
+        .values(stripe_customer_id=new_customer_id, updated_at=datetime.now(UTC))
+    )
+    fresh_org = await _ensure_org(db, org_uuid)
+    if fresh_org.stripe_customer_id is None:
+        fresh_org.stripe_customer_id = new_customer_id
     await db.commit()
-    return org.stripe_customer_id
+    await db.refresh(fresh_org)
+    del org_pk
+    resolved_customer_id = fresh_org.stripe_customer_id or new_customer_id
+    await release_session(db)
+    return resolved_customer_id
 
 
 def verify_operator_token(
@@ -136,11 +164,30 @@ async def _insert_if_absent(db: AsyncSession, model: Any, values: dict[str, Any]
     return result.rowcount == 1
 
 
+async def _resolve_webhook_org(
+    db: AsyncSession,
+    *,
+    organization_value: Any,
+    customer_id: Any,
+) -> NrOrg | None:
+    org: NrOrg | None = None
+    if organization_value:
+        org = await _ensure_org(db, uuid.UUID(str(organization_value)))
+    elif customer_id:
+        org = await db.scalar(select(NrOrg).where(NrOrg.stripe_customer_id == str(customer_id)))
+    if org is not None and customer_id and org.stripe_customer_id is None:
+        org.stripe_customer_id = str(customer_id)
+    return org
+
+
 async def _handle_stripe_event(db: AsyncSession, event_type: str, obj: Any) -> None:
     metadata = _metadata(obj)
     organization_value = _read(metadata, "organization_id")
     if event_type == "payment_intent.succeeded" and organization_value:
         org = await _ensure_org(db, uuid.UUID(str(organization_value)))
+        customer_id = _read(obj, "customer")
+        if customer_id and org.stripe_customer_id is None:
+            org.stripe_customer_id = str(customer_id)
         amount = _money(Decimal(str(_read(obj, "amount_received", _read(obj, "amount", 0)))) / 100)
         payment_id = str(_read(obj, "id", ""))
         await _insert_if_absent(
@@ -155,18 +202,16 @@ async def _handle_stripe_event(db: AsyncSession, event_type: str, obj: Any) -> N
             },
             ["type", "ref"],
         )
+        if org.status == "suspended" and org.suspend_reason == "payment_failed":
+            org.status = "active"
+            org.suspend_reason = None
     elif event_type in (
         "customer.subscription.created",
         "customer.subscription.updated",
         "customer.subscription.deleted",
     ):
-        org_id = organization_value
         customer_id = _read(obj, "customer")
-        org = (
-            await db.scalar(select(NrOrg).where(NrOrg.otari_org_id == uuid.UUID(str(org_id))))
-            if org_id
-            else await db.scalar(select(NrOrg).where(NrOrg.stripe_customer_id == str(customer_id)))
-        )
+        org = await _resolve_webhook_org(db, organization_value=organization_value, customer_id=customer_id)
         if org is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Subscription organization is not ready"
@@ -180,13 +225,16 @@ async def _handle_stripe_event(db: AsyncSession, event_type: str, obj: Any) -> N
                 raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Subscription is not ready")
             existing.status = "canceled"
             return
-        if event_type == "customer.subscription.updated" and existing is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Subscription is not ready")
+        if existing is not None and existing.status == "canceled":
+            return
         period_end = _read(obj, "current_period_end")
         if period_end is None:
             items = _read(_read(obj, "items", {}), "data", [])
             period_end = _read(items[0], "current_period_end") if items else None
         if period_end is None:
+            # Missing period_end means the subscription has no credit schedule yet;
+            # skip inserting now so a later customer.subscription.updated payload can upsert it.
+            logger.warning("Subscription %s has no current_period_end yet; deferring until updated", subscription_id)
             return
         values = {
             "org_id": org.id,
@@ -203,16 +251,17 @@ async def _handle_stripe_event(db: AsyncSession, event_type: str, obj: Any) -> N
                 setattr(existing, key, value)
     elif event_type == "invoice.payment_failed":
         customer_id = _read(obj, "customer")
-        org = await db.scalar(select(NrOrg).where(NrOrg.stripe_customer_id == str(customer_id)))
+        org = await _resolve_webhook_org(db, organization_value=organization_value, customer_id=customer_id)
         if org is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Invoice organization is not ready"
             )
-        org.status = "suspended"
-        org.suspend_reason = "payment_failed"
+        if org.status != "suspended":
+            org.status = "suspended"
+            org.suspend_reason = "payment_failed"
     elif event_type == "invoice.payment_succeeded":
         customer_id = _read(obj, "customer")
-        org = await db.scalar(select(NrOrg).where(NrOrg.stripe_customer_id == str(customer_id)))
+        org = await _resolve_webhook_org(db, organization_value=organization_value, customer_id=customer_id)
         if org is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Invoice organization is not ready"
@@ -224,11 +273,15 @@ async def _handle_stripe_event(db: AsyncSession, event_type: str, obj: Any) -> N
         payment_intent_id = _read(obj, "payment_intent")
         cumulative_amount = _money(Decimal(str(_read(obj, "amount_refunded", 0))) / 100)
         charge_id = str(_read(obj, "id", ""))
-        original = await db.scalar(
-            select(NrLedgerEntry).where(
-                NrLedgerEntry.type == "grant",
-                NrLedgerEntry.ref == f"stripe-payment:{payment_intent_id}",
+        original = (
+            await db.scalar(
+                select(NrLedgerEntry).where(
+                    NrLedgerEntry.type == "grant",
+                    NrLedgerEntry.ref == f"stripe-payment:{payment_intent_id}",
+                )
             )
+            if payment_intent_id
+            else None
         )
         context_refund = None
         if original is None and charge_id:
@@ -242,14 +295,15 @@ async def _handle_stripe_event(db: AsyncSession, event_type: str, obj: Any) -> N
                 .limit(1)
             )
         context = original or context_refund
-        if context is None:
-            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Refund payment is not ready")
-        org = await db.get(NrOrg, context.org_id)
+        org: NrOrg | None = None
+        if context is not None:
+            org = await db.get(NrOrg, context.org_id)
+        else:
+            customer_id = _read(obj, "customer")
+            org = await _resolve_webhook_org(db, organization_value=organization_value, customer_id=customer_id)
         if org is None:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Refund organization is not ready"
-            )
-        if payment_intent_id and charge_id:
+            return
+        if charge_id:
             await db.execute(update(NrOrg).where(NrOrg.id == org.id).values(updated_at=datetime.now(UTC)))
             escaped_charge_id = charge_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             already_refunded = await db.scalar(
@@ -286,15 +340,13 @@ async def create_top_up(
     org = await _authorized_org(organization_id, auth, db)
     stripe_client = StripeClient()
     customer_id = await _ensure_stripe_customer(db, org, organization_id, stripe_client)
-    await release_session(db)
     amount_minor = int((body.amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
-    intent = await asyncio.to_thread(
+    intent = await _call_stripe(
         stripe_client.create_payment_intent,
         customer_id=customer_id,
         organization_id=str(organization_id),
         amount_minor=amount_minor,
     )
-    await db.commit()
     return {"client_secret": str(_read(intent, "client_secret"))}
 
 
@@ -313,8 +365,7 @@ async def create_subscription(
         raise HTTPException(status_code=422, detail=f"The configured Stripe price for {body.plan} is required")
     stripe_client = StripeClient()
     customer_id = await _ensure_stripe_customer(db, org, organization_id, stripe_client)
-    await release_session(db)
-    subscription = await asyncio.to_thread(
+    subscription = await _call_stripe(
         stripe_client.create_subscription,
         customer_id=customer_id,
         price_id=body.price_id,
@@ -322,7 +373,6 @@ async def create_subscription(
         plan=body.plan,
         credit_amount=str(_PLAN_CREDITS[body.plan]),
     )
-    await db.commit()
     return {"id": str(_read(subscription, "id")), "status": str(_read(subscription, "status"))}
 
 
@@ -334,10 +384,11 @@ async def list_subscriptions(
 ) -> dict[str, Any]:
     """List subscriptions for the authenticated organization."""
     org = await _authorized_org(organization_id, auth, db)
-    if org.stripe_customer_id is None:
+    customer_id = org.stripe_customer_id
+    if customer_id is None:
         return {"data": []}
     await release_session(db)
-    result = await asyncio.to_thread(StripeClient().list_subscriptions, customer_id=org.stripe_customer_id)
+    result = await _call_stripe(StripeClient().list_subscriptions, customer_id=customer_id)
     return {"data": [_public_subscription(item) for item in _read(result, "data", [])]}
 
 
@@ -422,6 +473,10 @@ async def _review_e_transfer(
                 description="Approved e-transfer",
             )
         )
+        org = await db.get(NrOrg, transfer.org_id)
+        if org is not None and org.status == "suspended" and org.suspend_reason == "payment_failed":
+            org.status = "active"
+            org.suspend_reason = None
     await db.commit()
     return {"id": str(transfer.id), "status": transfer.status}
 
@@ -456,15 +511,7 @@ async def sweep_holds(
     now = datetime.now(UTC)
     holds = await db.scalars(
         select(NrHold)
-        .where(
-            and_(
-                NrHold.state == "open",
-                or_(
-                    and_(NrHold.expires_at.is_not(None), NrHold.expires_at <= now),
-                    and_(NrHold.expires_at.is_(None), NrHold.created_at <= now - _HOLD_TTL),
-                ),
-            )
-        )
+        .where(and_(NrHold.state == "open", _expired_condition(now)))
         .order_by(NrHold.created_at, NrHold.id)
         .with_for_update(skip_locked=True)
     )

@@ -13,6 +13,7 @@ depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
     op.add_column("nr_orgs", sa.Column("suspend_reason", sa.String(length=64), nullable=True))
+    op.execute("UPDATE nr_orgs SET suspend_reason='payment_failed' WHERE status='suspended' AND suspend_reason IS NULL")
     op.create_index("uq_nr_orgs_stripe_customer_id", "nr_orgs", ["stripe_customer_id"], unique=True)
     op.create_index("ix_nr_ledger_org_type", "nr_ledger_entries", ["org_id", "type"])
     with op.batch_alter_table("nr_e_transfers") as batch_op:

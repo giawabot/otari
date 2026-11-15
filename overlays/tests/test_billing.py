@@ -9,7 +9,15 @@ from typing import get_protocol_members
 import pytest
 from fastapi import HTTPException
 from northrouter_billing.adapter import NorthRouterBillingAdapter
-from northrouter_billing.models import NrETransfer, NrHold, NrLedgerEntry, NrOrg, NrSubscription, NrWebhookEvent
+from northrouter_billing.models import (
+    NrETransfer,
+    NrHold,
+    NrLedgerEntry,
+    NrOrg,
+    NrSubscription,
+    NrWebhookEvent,
+    _money,
+)
 from northrouter_billing.routes import (
     ETransferRequest,
     _handle_stripe_event,
@@ -358,24 +366,186 @@ async def test_invoice_success_does_not_clear_operator_suspension(db):
 
 @pytest.mark.asyncio
 async def test_release_hold_accepts_expired_open_hold(db):
-    org_id = await _org_and_credit(db)
+    org_id = await _org_and_credit(db, Decimal("60"))
     org = await db.scalar(select(NrOrg).where(NrOrg.otari_org_id == org_id))
     assert org is not None
-    created_at = datetime.now(UTC) - timedelta(hours=2)
-    hold = NrHold(
+    now = datetime.now(UTC)
+    expired_created_at = now - timedelta(hours=2)
+    expired_hold = NrHold(
         org_id=org.id,
         amount=Decimal("25"),
         state="open",
-        created_at=created_at,
-        expires_at=created_at + timedelta(hours=1),
+        created_at=expired_created_at,
+        expires_at=expired_created_at + timedelta(hours=1),
     )
-    db.add(hold)
+    unexpired_hold = NrHold(
+        org_id=org.id,
+        amount=Decimal("25"),
+        state="open",
+        created_at=now - timedelta(minutes=5),
+        expires_at=now + timedelta(minutes=55),
+    )
+    db.add_all([expired_hold, unexpired_hold])
     await db.flush()
 
-    await NorthRouterBillingAdapter(db).release_hold(organization_id=org_id, amount=Decimal("25"))
+    adapter = NorthRouterBillingAdapter(db)
+    await adapter.release_hold(organization_id=org_id, amount=Decimal("25"))
 
-    await db.refresh(hold)
-    assert hold.state == "released"
+    await db.refresh(unexpired_hold)
+    await db.refresh(expired_hold)
+    assert unexpired_hold.state == "released"
+    assert expired_hold.state == "open"
+
+    await adapter.release_hold(organization_id=org_id, amount=Decimal("25"))
+
+    await db.refresh(expired_hold)
+    assert expired_hold.state == "released"
+
+
+@pytest.mark.asyncio
+async def test_apply_due_credit_grants_nothing_to_suspended_org(db):
+    org_id = uuid.uuid4()
+    adapter = NorthRouterBillingAdapter(db)
+    org = await adapter._org(org_id)
+    org.status = "suspended"
+    org.suspend_reason = "payment_failed"
+    db.add(
+        NrSubscription(
+            org_id=org.id,
+            stripe_subscription_id="sub_suspended",
+            plan="starter",
+            status="active",
+            current_period_end=datetime.now(UTC) + timedelta(days=30),
+            credit_amount=Decimal("100"),
+        )
+    )
+    await db.flush()
+
+    await adapter.apply_due_credit(organization_id=org_id)
+
+    grants = await db.scalar(
+        select(func.count()).select_from(NrLedgerEntry).where(NrLedgerEntry.ref.like("subscription:sub_suspended:%"))
+    )
+    assert grants == 0
+
+
+@pytest.mark.asyncio
+async def test_payment_failed_preserves_existing_suspend_reason_and_payment_succeeded_keeps_it_suspended(db):
+    org_id = await _org_and_credit(db)
+    org = await db.scalar(select(NrOrg).where(NrOrg.otari_org_id == org_id))
+    assert org is not None
+    org.stripe_customer_id = "cus_preserve_reason"
+    org.status = "suspended"
+    org.suspend_reason = "manual_review"
+
+    await _handle_stripe_event(db, "invoice.payment_failed", {"customer": "cus_preserve_reason"})
+    assert org.status == "suspended"
+    assert org.suspend_reason == "manual_review"
+
+    await _handle_stripe_event(
+        db,
+        "payment_intent.succeeded",
+        {
+            "id": "pi_preserve_reason",
+            "amount_received": 1000,
+            "metadata": {"organization_id": str(org_id)},
+        },
+    )
+    assert org.status == "suspended"
+    assert org.suspend_reason == "manual_review"
+
+
+@pytest.mark.asyncio
+async def test_e_transfer_approval_reactivates_payment_failed_suspension(db, monkeypatch):
+    monkeypatch.setenv("NORTHROUTER_BILLING_OPERATOR_TOKEN", "operator-secret")
+    org_id = uuid.uuid4()
+    org = await NorthRouterBillingAdapter(db)._org(org_id)
+    org.status = "suspended"
+    org.suspend_reason = "payment_failed"
+    await db.flush()
+
+    pending = await submit_e_transfer(
+        ETransferRequest(organization_id=org_id, amount=Decimal("100"), reference="etransfer-reactivate"),
+        db,
+        (None, True),
+    )
+    await _review_e_transfer(uuid.UUID(pending["id"]), db, approve=True)
+
+    await db.refresh(org)
+    assert org.status == "active"
+    assert org.suspend_reason is None
+
+
+@pytest.mark.asyncio
+async def test_charge_refunded_for_unknown_charge_returns_cleanly(db):
+    await _handle_stripe_event(
+        db,
+        "charge.refunded",
+        {
+            "id": "ch_unknown",
+            "payment_intent": "pi_unknown",
+            "amount_refunded": 500,
+        },
+    )
+    assert await db.scalar(select(func.count()).select_from(NrLedgerEntry)) == 0
+
+
+def test_money_rejects_nan_and_infinity():
+    for bad in (Decimal("NaN"), Decimal("Infinity"), Decimal("-Infinity"), "NaN", "Infinity", "-Infinity"):
+        with pytest.raises(ValueError, match="finite"):
+            _money(bad)
+
+
+@pytest.mark.asyncio
+async def test_incremental_partial_refunds_on_one_charge(db):
+    org_id = await _org_and_credit(db, Decimal("25"))
+    org = await db.scalar(select(NrOrg).where(NrOrg.otari_org_id == org_id))
+    assert org is not None
+    db.add(
+        NrLedgerEntry(
+            org_id=org.id,
+            type="grant",
+            amount=Decimal("25"),
+            ref="stripe-payment:pi_partial",
+        )
+    )
+    await db.flush()
+
+    await _handle_stripe_event(
+        db,
+        "charge.refunded",
+        {
+            "id": "ch_partial",
+            "payment_intent": "pi_partial",
+            "amount_refunded": 200,
+        },
+    )
+    await _handle_stripe_event(
+        db,
+        "charge.refunded",
+        {
+            "id": "ch_partial",
+            "amount_refunded": 500,
+        },
+    )
+    entries = list(
+        await db.scalars(
+            select(NrLedgerEntry)
+            .where(
+                NrLedgerEntry.org_id == org.id,
+                NrLedgerEntry.type == "refund",
+            )
+            .order_by(NrLedgerEntry.created_at, NrLedgerEntry.ref)
+        )
+    )
+    assert [entry.amount for entry in entries] == [Decimal("-2.000000"), Decimal("-3.000000")]
+
+
+@pytest.mark.asyncio
+async def test_release_hold_zero_is_a_noop(db):
+    org_id = await _org_and_credit(db)
+    await NorthRouterBillingAdapter(db).release_hold(organization_id=org_id, amount=Decimal("0"))
+    assert await db.scalar(select(func.count()).select_from(NrLedgerEntry).where(NrLedgerEntry.type == "release")) == 0
 
 
 @pytest.mark.asyncio
