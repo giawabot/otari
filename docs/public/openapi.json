@@ -4927,7 +4927,7 @@
                 "type": "null"
               }
             ],
-            "description": "Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
+            "description": "Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
             "title": "Residency"
           },
           "response_format": {
@@ -13704,7 +13704,7 @@
                 "type": "null"
               }
             ],
-            "description": "Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
+            "description": "Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
             "title": "Residency"
           },
           "service_tier": {
@@ -21581,7 +21581,7 @@
         "type": "object"
       },
       "ResidencyFloorUpdateRequest": {
-        "description": "Set or clear the organization's residency floor (NorthRouter plan 01b).\n\n``residency_floor`` is a bar name (\"canadian\", \"sovereign\",\n\"sovereign_model\") or null for no floor. An unknown name is refused\nrather than silently treated as no floor: a typo in a compliance\ncontrol must fail loudly.",
+        "description": "Set or clear the organization's residency floor (NorthRouter plan 01b).\n\n``residency_floor`` is a bar name (\"domestic\", \"sovereign\",\n\"sovereign_model\") or null for no floor. An unknown name is refused\nrather than silently treated as no floor: a typo in a compliance\ncontrol must fail loudly.",
         "properties": {
           "residency_floor": {
             "anyOf": [
@@ -21962,7 +21962,7 @@
                 "type": "null"
               }
             ],
-            "description": "Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
+            "description": "Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
             "title": "Residency"
           },
           "response_format": {
@@ -40537,7 +40537,7 @@
             }
           },
           {
-            "description": "Filter models by residency: canadian (level 2+), sovereign (level 3+), or sovereign_model (level 4).",
+            "description": "Filter models by residency: domestic (level 2+), sovereign (level 3+), or sovereign_model (level 4).",
             "in": "query",
             "name": "residency",
             "required": false,
@@ -40550,7 +40550,7 @@
                   "type": "null"
                 }
               ],
-              "description": "Filter models by residency: canadian (level 2+), sovereign (level 3+), or sovereign_model (level 4).",
+              "description": "Filter models by residency: domestic (level 2+), sovereign (level 3+), or sovereign_model (level 4).",
               "title": "Residency"
             }
           },

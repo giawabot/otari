@@ -211,7 +211,7 @@ async def list_models(
         str | None,
         Query(
             description=(
-                "Filter models by residency: canadian (level 2+), sovereign (level 3+), or sovereign_model (level 4)."
+                "Filter models by residency: domestic (level 2+), sovereign (level 3+), or sovereign_model (level 4)."
             )
         ),
     ] = None,

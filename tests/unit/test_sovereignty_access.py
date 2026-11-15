@@ -43,7 +43,7 @@ class _Row:
 
 class TestParseResidencyBar:
     def test_wire_mapping(self) -> None:
-        assert parse_residency_bar("canadian") == 2
+        assert parse_residency_bar("domestic") == 2
         assert parse_residency_bar("sovereign") == 3
         assert parse_residency_bar("sovereign_model") == 4
 
@@ -152,18 +152,18 @@ class TestCombineResidencyBars:
         assert combine_residency_bars(None, None) == (1, "none")
 
     def test_request_bar_alone(self) -> None:
-        assert combine_residency_bars("canadian", None) == (2, "request")
+        assert combine_residency_bars("domestic", None) == (2, "request")
         assert combine_residency_bars("sovereign_model", None) == (4, "request")
 
     def test_floor_alone_binds(self) -> None:
         assert combine_residency_bars(None, "sovereign") == (3, "organization")
 
     def test_lower_request_bar_cannot_relax_the_floor(self) -> None:
-        # Request 'canadian' under a 'sovereign' floor: level 3 anyway.
-        assert combine_residency_bars("canadian", "sovereign") == (3, "organization")
+        # Request 'domestic' under a 'sovereign' floor: level 3 anyway.
+        assert combine_residency_bars("domestic", "sovereign") == (3, "organization")
 
     def test_higher_request_bar_raises_above_the_floor(self) -> None:
-        assert combine_residency_bars("sovereign_model", "canadian") == (4, "request")
+        assert combine_residency_bars("sovereign_model", "domestic") == (4, "request")
 
     def test_tie_reports_both_sources(self) -> None:
         assert combine_residency_bars("sovereign", "sovereign") == (3, "both")

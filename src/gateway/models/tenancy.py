@@ -385,7 +385,7 @@ class Organization(OrganizationBase, PrimaryKeyMixin, CreatedAtMixin, UpdatedAtM
     __table_args__ = (UniqueConstraint("slug", name="uq_organization_slug"),)
 
     # The organization's residency floor (NorthRouter plan 01b): a bar name
-    # ("canadian", "sovereign", "sovereign_model") that every request from
+    # ("domestic", "sovereign", "sovereign_model") that every request from
     # this organization must clear, or None for no floor. Resolved from the
     # billed key's organization, so no key configuration escapes it:
     # ``allowed_models: null`` means "no per-key restriction", not "exempt
@@ -566,7 +566,7 @@ class ActiveOrganizationUpdateRequest(SQLModel):
 class ResidencyFloorUpdateRequest(SQLModel):
     """Set or clear the organization's residency floor (NorthRouter plan 01b).
 
-    ``residency_floor`` is a bar name ("canadian", "sovereign",
+    ``residency_floor`` is a bar name ("domestic", "sovereign",
     "sovereign_model") or null for no floor. An unknown name is refused
     rather than silently treated as no floor: a typo in a compliance
     control must fail loudly.

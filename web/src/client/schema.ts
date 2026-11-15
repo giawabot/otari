@@ -10880,7 +10880,7 @@ export interface components {
             reasoning_effort: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto") | null;
             /**
              * Residency
-             * @description Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
+             * @description Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
              */
             residency?: string | null;
             /** Response Format */
@@ -15016,7 +15016,7 @@ export interface components {
             prompt_cache_key?: string | null;
             /**
              * Residency
-             * @description Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
+             * @description Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
              */
             residency?: string | null;
             /** Service Tier */
@@ -18848,7 +18848,7 @@ export interface components {
          * ResidencyFloorUpdateRequest
          * @description Set or clear the organization's residency floor (NorthRouter plan 01b).
          *
-         *     ``residency_floor`` is a bar name ("canadian", "sovereign",
+         *     ``residency_floor`` is a bar name ("domestic", "sovereign",
          *     "sovereign_model") or null for no floor. An unknown name is refused
          *     rather than silently treated as no floor: a typo in a compliance
          *     control must fail loudly.
@@ -18958,7 +18958,7 @@ export interface components {
             } | null;
             /**
              * Residency
-             * @description Optional residency policy for this request. 'canadian' routes only to providers hosted in Canada; 'sovereign' requires Canadian-owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
+             * @description Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
              */
             residency?: string | null;
             /** Response Format */
@@ -27642,7 +27642,7 @@ export interface operations {
             query?: {
                 /** @description Only the models this provider instance serves, described as served there. */
                 provider?: string | null;
-                /** @description Filter models by residency: canadian (level 2+), sovereign (level 3+), or sovereign_model (level 4). */
+                /** @description Filter models by residency: domestic (level 2+), sovereign (level 3+), or sovereign_model (level 4). */
                 residency?: string | null;
                 /** @description For a signed-in caller, only the models a request billed to this workspace may call. */
                 workspace_id?: string | null;

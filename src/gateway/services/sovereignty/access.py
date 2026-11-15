@@ -1,6 +1,6 @@
 """Sovereignty access control: residency bars over provider attestations.
 
-A request may carry a residency bar (``residency: "canadian"`` or
+A request may carry a residency bar (``residency: "domestic"`` or
 ``"sovereign"`` on the wire) that maps to a minimum sovereignty level.
 Every routing candidate must clear the bar or be dropped from the plan,
 exactly alongside the per-key model allow-list.
@@ -9,7 +9,7 @@ The public wire vocabulary maps onto the internal 1-4 scale:
 
 | wire value        | required level |
 | ----------------- | -------------- |
-| ``canadian``      | >= 2           |
+| ``domestic``      | >= 2           |
 | ``sovereign``     | >= 3           |
 | ``sovereign_model`` | >= 4         |
 
@@ -30,7 +30,7 @@ Precedence for a candidate's attestation (highest first):
 6. No attestation: level 1 (``not_sovereign``), which fails any bar above 1.
 
 Unknown providers fail closed against a bar: an unattested provider is
-level 1, so ``residency: canadian`` refuses it rather than trusting the
+level 1, so ``residency: domestic`` refuses it rather than trusting the
 absence of evidence.
 """
 
@@ -39,7 +39,7 @@ from typing import Any
 
 # Wire value -> required minimum sovereignty level.
 RESIDENCY_BARS: dict[str, int] = {
-    "canadian": 2,
+    "domestic": 2,
     "sovereign": 3,
     "sovereign_model": 4,
 }

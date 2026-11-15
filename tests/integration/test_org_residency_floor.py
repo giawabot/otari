@@ -165,9 +165,9 @@ def test_request_bar_still_raises_above_the_floor(
     db_session_factory: Any,
 ) -> None:
     api_key_header = _mint_key_header(floor_client, master_key_header)
-    # Floor 'canadian' (2) + request 'sovereign_model' (4): level 4 binds,
+    # Floor 'domestic' (2) + request 'sovereign_model' (4): level 4 binds,
     # and the level-3 attestation no longer clears it.
-    _set_floor(db_session_factory, "canadian")
+    _set_floor(db_session_factory, "domestic")
     response = _chat(floor_client, api_key_header, "sovbox:m", residency="sovereign_model")
     assert response.status_code == 403
     assert "Residency policy 'sovereign_model'" in response.text
