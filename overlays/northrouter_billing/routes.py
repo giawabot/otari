@@ -5,28 +5,29 @@ import hmac
 import logging
 import os
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import ROUND_HALF_UP, Decimal
 from typing import Annotated, Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from gateway.api.deps import get_db, verify_api_key_or_master_key
+from gateway.core.database import release_session
 from gateway.models.api_keys import APIKey
 from gateway.models.tenancy import Workspace
-from northrouter_billing.adapter import NorthRouterBillingAdapter
+from northrouter_billing.adapter import _HOLD_TTL, NorthRouterBillingAdapter
 from northrouter_billing.models import NrETransfer, NrHold, NrLedgerEntry, NrOrg, NrSubscription, NrWebhookEvent, _money
 from northrouter_billing.stripe_client import StripeClient
 
 billing_router = APIRouter(prefix="/nr/billing", tags=["NorthRouter billing"])
 _TRANSFER_AMOUNTS = frozenset({Decimal("100"), Decimal("500"), Decimal("1000")})
 _PLAN_CREDITS = {"starter": Decimal("100"), "growth": Decimal("500"), "scale": Decimal("1000")}
-_HOLD_TTL = timedelta(hours=1)
 logger = logging.getLogger(__name__)
 
 
@@ -69,6 +70,36 @@ async def _authorized_org(
 async def _ensure_org(db: AsyncSession, organization_id: uuid.UUID) -> NrOrg:
     adapter = NorthRouterBillingAdapter(db)
     return await adapter._org(organization_id)
+
+
+async def _ensure_stripe_customer(
+    db: AsyncSession,
+    org: NrOrg,
+    organization_id: uuid.UUID,
+    stripe_client: StripeClient,
+) -> str:
+    if org.stripe_customer_id is not None:
+        return org.stripe_customer_id
+    released = await release_session(db)
+    customer = await asyncio.to_thread(
+        stripe_client.create_customer,
+        organization_id=str(organization_id),
+        idempotency_key=f"nr-org-{org.id}",
+    )
+    if not released:
+        org = await _ensure_org(db, organization_id)
+    org.stripe_customer_id = str(_read(customer, "id"))
+    await db.commit()
+    return org.stripe_customer_id
+
+
+def verify_operator_token(
+    operator_token: Annotated[str | None, Header(alias="NorthRouter-Operator-Token")] = None,
+) -> str:
+    expected = os.getenv("NORTHROUTER_BILLING_OPERATOR_TOKEN", "")
+    if not expected or operator_token is None or not hmac.compare_digest(operator_token, expected):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Operator authorization required")
+    return operator_token
 
 
 def _stripe_data(event: Any) -> tuple[str, Any]:
@@ -124,26 +155,39 @@ async def _handle_stripe_event(db: AsyncSession, event_type: str, obj: Any) -> N
             },
             ["type", "ref"],
         )
-    elif event_type in ("customer.subscription.created", "customer.subscription.updated"):
+    elif event_type in (
+        "customer.subscription.created",
+        "customer.subscription.updated",
+        "customer.subscription.deleted",
+    ):
         org_id = organization_value
         customer_id = _read(obj, "customer")
         org = (
-            await _ensure_org(db, uuid.UUID(str(org_id)))
+            await db.scalar(select(NrOrg).where(NrOrg.otari_org_id == uuid.UUID(str(org_id))))
             if org_id
             else await db.scalar(select(NrOrg).where(NrOrg.stripe_customer_id == str(customer_id)))
         )
         if org is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Subscription organization is not ready"
+            )
+        subscription_id = str(_read(obj, "id", ""))
+        existing = await db.scalar(
+            select(NrSubscription).where(NrSubscription.stripe_subscription_id == subscription_id)
+        )
+        if event_type == "customer.subscription.deleted":
+            if existing is None:
+                raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Subscription is not ready")
+            existing.status = "canceled"
             return
+        if event_type == "customer.subscription.updated" and existing is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Subscription is not ready")
         period_end = _read(obj, "current_period_end")
         if period_end is None:
             items = _read(_read(obj, "items", {}), "data", [])
             period_end = _read(items[0], "current_period_end") if items else None
         if period_end is None:
             return
-        subscription_id = str(_read(obj, "id"))
-        existing = await db.scalar(
-            select(NrSubscription).where(NrSubscription.stripe_subscription_id == subscription_id)
-        )
         values = {
             "org_id": org.id,
             "stripe_subscription_id": subscription_id,
@@ -160,28 +204,52 @@ async def _handle_stripe_event(db: AsyncSession, event_type: str, obj: Any) -> N
     elif event_type == "invoice.payment_failed":
         customer_id = _read(obj, "customer")
         org = await db.scalar(select(NrOrg).where(NrOrg.stripe_customer_id == str(customer_id)))
-        if org is not None:
-            org.status = "suspended"
+        if org is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Invoice organization is not ready"
+            )
+        org.status = "suspended"
+        org.suspend_reason = "payment_failed"
     elif event_type == "invoice.payment_succeeded":
         customer_id = _read(obj, "customer")
         org = await db.scalar(select(NrOrg).where(NrOrg.stripe_customer_id == str(customer_id)))
-        if org is not None:
+        if org is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Invoice organization is not ready"
+            )
+        if org.status == "suspended" and org.suspend_reason == "payment_failed":
             org.status = "active"
+            org.suspend_reason = None
     elif event_type == "charge.refunded":
         payment_intent_id = _read(obj, "payment_intent")
         cumulative_amount = _money(Decimal(str(_read(obj, "amount_refunded", 0))) / 100)
-        if organization_value:
-            org = await _ensure_org(db, uuid.UUID(str(organization_value)))
-        else:
-            original = await db.scalar(
-                select(NrLedgerEntry).where(
-                    NrLedgerEntry.type == "grant",
-                    NrLedgerEntry.ref == f"stripe-payment:{payment_intent_id}",
-                )
+        charge_id = str(_read(obj, "id", ""))
+        original = await db.scalar(
+            select(NrLedgerEntry).where(
+                NrLedgerEntry.type == "grant",
+                NrLedgerEntry.ref == f"stripe-payment:{payment_intent_id}",
             )
-            org = await db.get(NrOrg, original.org_id) if original is not None else None
-        if org is not None and payment_intent_id:
-            charge_id = str(_read(obj, "id"))
+        )
+        context_refund = None
+        if original is None and charge_id:
+            escaped_charge_id = charge_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+            context_refund = await db.scalar(
+                select(NrLedgerEntry)
+                .where(
+                    NrLedgerEntry.type == "refund",
+                    NrLedgerEntry.ref.like(f"stripe-refund:{escaped_charge_id}:%", escape="\\"),
+                )
+                .limit(1)
+            )
+        context = original or context_refund
+        if context is None:
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Refund payment is not ready")
+        org = await db.get(NrOrg, context.org_id)
+        if org is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="Refund organization is not ready"
+            )
+        if payment_intent_id and charge_id:
             await db.execute(update(NrOrg).where(NrOrg.id == org.id).values(updated_at=datetime.now(UTC)))
             escaped_charge_id = charge_id.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
             already_refunded = await db.scalar(
@@ -217,18 +285,12 @@ async def create_top_up(
     """Create a Stripe PaymentIntent for the authenticated organization's top-up."""
     org = await _authorized_org(organization_id, auth, db)
     stripe_client = StripeClient()
-    if org.stripe_customer_id is None:
-        customer = await asyncio.to_thread(
-            stripe_client.create_customer,
-            organization_id=str(organization_id),
-            idempotency_key=f"nr-org-{org.id}",
-        )
-        org.stripe_customer_id = str(_read(customer, "id"))
-        await db.commit()
+    customer_id = await _ensure_stripe_customer(db, org, organization_id, stripe_client)
+    await release_session(db)
     amount_minor = int((body.amount * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     intent = await asyncio.to_thread(
         stripe_client.create_payment_intent,
-        customer_id=org.stripe_customer_id,
+        customer_id=customer_id,
         organization_id=str(organization_id),
         amount_minor=amount_minor,
     )
@@ -250,13 +312,11 @@ async def create_subscription(
     if not configured_price or body.price_id != configured_price:
         raise HTTPException(status_code=422, detail=f"The configured Stripe price for {body.plan} is required")
     stripe_client = StripeClient()
-    if org.stripe_customer_id is None:
-        customer = await asyncio.to_thread(stripe_client.create_customer, organization_id=str(organization_id))
-        org.stripe_customer_id = str(_read(customer, "id"))
-        await db.flush()
+    customer_id = await _ensure_stripe_customer(db, org, organization_id, stripe_client)
+    await release_session(db)
     subscription = await asyncio.to_thread(
         stripe_client.create_subscription,
-        customer_id=org.stripe_customer_id,
+        customer_id=customer_id,
         price_id=body.price_id,
         organization_id=str(organization_id),
         plan=body.plan,
@@ -276,6 +336,7 @@ async def list_subscriptions(
     org = await _authorized_org(organization_id, auth, db)
     if org.stripe_customer_id is None:
         return {"data": []}
+    await release_session(db)
     result = await asyncio.to_thread(StripeClient().list_subscriptions, customer_id=org.stripe_customer_id)
     return {"data": [_public_subscription(item) for item in _read(result, "data", [])]}
 
@@ -309,8 +370,9 @@ async def stripe_webhook(
     try:
         async with db.begin_nested():
             await _handle_stripe_event(db, event_type, obj)
-    except ValueError:
-        logger.warning("Skipping invalid Stripe event of type %s", event_type)
+    except (ValueError, ArithmeticError):
+        await db.execute(update(NrWebhookEvent).where(NrWebhookEvent.event_id == event_id).values(succeeded=False))
+        logger.warning("Skipping invalid Stripe event %s", event_id)
         skipped = True
     await db.commit()
     return {"received": True, **({"status": "skipped"} if skipped else {})}
@@ -328,20 +390,20 @@ async def submit_e_transfer(
     org = await _authorized_org(body.organization_id, auth, db)
     transfer = NrETransfer(org_id=org.id, amount=_money(body.amount), reference=body.reference, status="pending")
     db.add(transfer)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="duplicate reference") from exc
     return {"id": str(transfer.id), "status": transfer.status}
 
 
 async def _review_e_transfer(
     transfer_id: uuid.UUID,
     db: AsyncSession,
-    operator_token: str | None,
     *,
     approve: bool,
 ) -> dict[str, str]:
-    expected = os.getenv("NORTHROUTER_BILLING_OPERATOR_TOKEN", "")
-    if not expected or operator_token is None or not hmac.compare_digest(operator_token, expected):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Operator authorization required")
     transfer = await db.scalar(select(NrETransfer).where(NrETransfer.id == transfer_id).with_for_update())
     if transfer is None:
         raise HTTPException(status_code=404, detail="E-transfer not found")
@@ -368,36 +430,41 @@ async def _review_e_transfer(
 async def approve_e_transfer(
     transfer_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    operator_token: Annotated[str | None, Header(alias="NorthRouter-Operator-Token")] = None,
+    _operator_token: Annotated[str, Depends(verify_operator_token)],
 ) -> dict[str, str]:
     """Approve a pending e-transfer after operator-token verification."""
-    return await _review_e_transfer(transfer_id, db, operator_token, approve=True)
+    return await _review_e_transfer(transfer_id, db, approve=True)
 
 
 @billing_router.post("/e-transfers/{transfer_id}/reject")
 async def reject_e_transfer(
     transfer_id: uuid.UUID,
     db: Annotated[AsyncSession, Depends(get_db)],
-    operator_token: Annotated[str | None, Header(alias="NorthRouter-Operator-Token")] = None,
+    _operator_token: Annotated[str, Depends(verify_operator_token)],
 ) -> dict[str, str]:
     """Reject a pending e-transfer after operator-token verification."""
-    return await _review_e_transfer(transfer_id, db, operator_token, approve=False)
+    return await _review_e_transfer(transfer_id, db, approve=False)
 
 
 @billing_router.post("/holds/sweep")
 async def sweep_holds(
     db: Annotated[AsyncSession, Depends(get_db)],
-    operator_token: Annotated[str | None, Header(alias="NorthRouter-Operator-Token")] = None,
+    _operator_token: Annotated[str, Depends(verify_operator_token)],
 ) -> dict[str, int]:
     """Release open holds that have been outstanding for at least one hour."""
-    expected = os.getenv("NORTHROUTER_BILLING_OPERATOR_TOKEN", "")
-    if not expected or operator_token is None or not hmac.compare_digest(operator_token, expected):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Operator authorization required")
 
     now = datetime.now(UTC)
     holds = await db.scalars(
         select(NrHold)
-        .where(NrHold.state == "open", NrHold.created_at <= now - _HOLD_TTL)
+        .where(
+            and_(
+                NrHold.state == "open",
+                or_(
+                    and_(NrHold.expires_at.is_not(None), NrHold.expires_at <= now),
+                    and_(NrHold.expires_at.is_(None), NrHold.created_at <= now - _HOLD_TTL),
+                ),
+            )
+        )
         .order_by(NrHold.created_at, NrHold.id)
         .with_for_update(skip_locked=True)
     )
@@ -450,8 +517,11 @@ async def get_ledger(
 
 def _public_subscription(item: Any) -> dict[str, str | None]:
     """Expose Stripe subscription state without returning customer or payment data."""
+    period_end = _read(item, "current_period_end")
     return {
         "id": str(_read(item, "id")),
         "status": str(_read(item, "status")),
-        "current_period_end": str(_read(item, "current_period_end", "")),
+        "current_period_end": (
+            datetime.fromtimestamp(int(period_end), UTC).isoformat() if period_end is not None else None
+        ),
     }

@@ -26,7 +26,10 @@ MONEY_SCALE = Decimal("0.000001")
 def _money(value: Any) -> Decimal:
     if isinstance(value, bool) or not isinstance(value, Decimal | int | str):
         raise TypeError("Billing amounts must be Decimal, int, or decimal text")
-    return Decimal(value).quantize(MONEY_SCALE, rounding=ROUND_HALF_UP)
+    amount = Decimal(value)
+    if not amount.is_finite():
+        raise ValueError("Billing amounts must be finite")
+    return amount.quantize(MONEY_SCALE, rounding=ROUND_HALF_UP)
 
 
 class UsdAmount(TypeDecorator[Decimal]):
@@ -52,12 +55,16 @@ class NrOrg(BillingBase):
     otari_org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, unique=True, index=True)
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    suspend_reason: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
     )
 
-    __table_args__ = (CheckConstraint("status IN ('active', 'suspended')", name="ck_nr_orgs_status"),)
+    __table_args__ = (
+        CheckConstraint("status IN ('active', 'suspended')", name="ck_nr_orgs_status"),
+        Index("uq_nr_orgs_stripe_customer_id", "stripe_customer_id", unique=True),
+    )
 
 
 class NrLedgerEntry(BillingBase):
@@ -66,7 +73,7 @@ class NrLedgerEntry(BillingBase):
     __tablename__ = "nr_ledger_entries"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("nr_orgs.id", ondelete="CASCADE"), index=True)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("nr_orgs.id", ondelete="CASCADE"))
     type: Mapped[str] = mapped_column(String(16), nullable=False)
     amount: Mapped[Decimal] = mapped_column(UsdAmount(), nullable=False)
     ref: Mapped[str | None] = mapped_column(String(255))
@@ -82,6 +89,7 @@ class NrLedgerEntry(BillingBase):
         ),
         UniqueConstraint("type", "ref", name="uq_nr_ledger_type_ref"),
         Index("ix_nr_ledger_org_created", "org_id", "created_at"),
+        Index("ix_nr_ledger_org_type", "org_id", "type"),
     )
 
 
@@ -91,7 +99,7 @@ class NrHold(BillingBase):
     __tablename__ = "nr_holds"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("nr_orgs.id", ondelete="CASCADE"), index=True)
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("nr_orgs.id", ondelete="CASCADE"))
     amount: Mapped[Decimal] = mapped_column(UsdAmount(), nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
@@ -121,6 +129,7 @@ class NrETransfer(BillingBase):
 
     __table_args__ = (
         CheckConstraint("status IN ('pending', 'approved', 'rejected')", name="ck_nr_e_transfers_status"),
+        UniqueConstraint("org_id", "reference", name="uq_nr_e_transfers_org_reference"),
     )
 
 

@@ -25,8 +25,8 @@ def _database_url() -> str:
     url = make_url(value)
     if url.drivername == "sqlite+aiosqlite":
         url = url.set(drivername="sqlite")
-    elif url.drivername == "postgresql+asyncpg":
-        url = url.set(drivername="postgresql+psycopg")
+    elif url.drivername in {"postgresql+asyncpg", "postgresql"}:
+        url = url.set(drivername="postgresql+psycopg2")
     return url.render_as_string(hide_password=False)
 
 

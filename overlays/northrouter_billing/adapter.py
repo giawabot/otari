@@ -6,7 +6,7 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, or_, select, update
+from sqlalchemy import case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -107,6 +107,7 @@ class NorthRouterBillingAdapter(BillingPort):
             select(NrSubscription).where(
                 NrSubscription.org_id == org.id,
                 NrSubscription.status.in_(("active", "trialing")),
+                NrSubscription.current_period_end > datetime.now(UTC),
             )
         )
         for subscription in subscriptions:
@@ -160,6 +161,7 @@ class NorthRouterBillingAdapter(BillingPort):
             select(NrSubscription).where(
                 NrSubscription.org_id == org.id,
                 NrSubscription.status.in_(("active", "trialing")),
+                NrSubscription.current_period_end > datetime.now(UTC),
             )
         )
         for subscription in subscriptions:
@@ -198,7 +200,9 @@ class NorthRouterBillingAdapter(BillingPort):
         await session.execute(update(NrOrg).where(NrOrg.id == org.id).values(updated_at=datetime.now(UTC)))
         paid_in, consumed, held = await self._amounts(org.id)
         available = _money(paid_in - consumed - held)
-        if org.status != "active" or available < amount:
+        if org.status != "active":
+            raise InsufficientFundsError(available, _SUSPENDED_MESSAGE)
+        if available < amount:
             raise InsufficientFundsError(available)
         hold = NrHold(
             org_id=org.id,
@@ -215,15 +219,15 @@ class NorthRouterBillingAdapter(BillingPort):
         amount = _money(amount)
         org = await self._org(organization_id)
         session = self._session()
+        now = datetime.now(UTC)
         hold = await session.scalar(
             select(NrHold)
             .where(
                 NrHold.org_id == org.id,
                 NrHold.amount == amount,
                 NrHold.state == "open",
-                or_(NrHold.expires_at.is_(None), NrHold.expires_at > datetime.now(UTC)),
             )
-            .order_by(NrHold.created_at, NrHold.id)
+            .order_by(case((NrHold.expires_at <= now, 1), else_=0), NrHold.created_at, NrHold.id)
             .limit(1)
             .with_for_update(skip_locked=True)
         )
