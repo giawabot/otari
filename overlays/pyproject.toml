@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "northrouter-billing"
+version = "0.1.0"
+description = "NorthRouter billing overlay for Otari"
+requires-python = ">=3.13"
+dependencies = [
+    "alembic>=1.13",
+    "httpx>=0.28",
+    "pydantic>=2",
+    "sqlalchemy[asyncio]>=2",
+    "stripe>=11",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["northrouter_billing*"]
+
+[tool.setuptools.package-data]
+northrouter_billing = ["alembic.ini", "alembic/env.py", "alembic/versions/*.py"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+testpaths = ["tests"]

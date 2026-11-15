@@ -1,0 +1,204 @@
+"""Billing adapter and contributed HTTP route behavior."""
+
+import uuid
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from types import SimpleNamespace
+from typing import get_protocol_members
+
+import pytest
+from fastapi import HTTPException
+from northrouter_billing.adapter import NorthRouterBillingAdapter
+from northrouter_billing.models import NrETransfer, NrLedgerEntry, NrOrg, NrSubscription
+from northrouter_billing.routes import (
+    ETransferRequest,
+    _review_e_transfer,
+    approve_e_transfer,
+    reject_e_transfer,
+    stripe_webhook,
+    submit_e_transfer,
+)
+from northrouter_billing.stripe_client import StripeClient
+from sqlalchemy import func, select
+
+from gateway.container import build_container
+from gateway.ports.billing_port import NO_TOOLS, BillingPort, InsufficientFundsError
+
+
+async def _org_and_credit(db, amount: Decimal = Decimal("25")) -> uuid.UUID:
+    org_id = uuid.uuid4()
+    adapter = NorthRouterBillingAdapter(db)
+    org = await adapter._org(org_id)
+    db.add(NrLedgerEntry(org_id=org.id, type="grant", amount=amount, ref=f"seed:{org_id}"))
+    await db.flush()
+    return org_id
+
+
+@pytest.mark.asyncio
+async def test_funded_gate_passes(db):
+    org_id = await _org_and_credit(db)
+    await NorthRouterBillingAdapter(db).require_funds_on_deposit(
+        organization_id=org_id, billed=None, tools=frozenset(), actor_user_id=None
+    )
+
+
+@pytest.mark.asyncio
+async def test_zero_balance_raises_with_available_amount(db):
+    org_id = uuid.uuid4()
+    with pytest.raises(InsufficientFundsError) as raised:
+        await NorthRouterBillingAdapter(db).require_funds_on_deposit(
+            organization_id=org_id, billed=None, tools=frozenset(), actor_user_id=None
+        )
+    assert raised.value.available == Decimal("0.000000")
+
+
+@pytest.mark.asyncio
+async def test_suspended_organization_is_refused(db):
+    org_id = await _org_and_credit(db)
+    org = await db.scalar(select(NrOrg).where(NrOrg.otari_org_id == org_id))
+    assert org is not None
+    org.status = "suspended"
+    with pytest.raises(InsufficientFundsError) as raised:
+        await NorthRouterBillingAdapter(db).require_funds_on_deposit(
+            organization_id=org_id, billed=None, tools=frozenset(), actor_user_id=None
+        )
+    assert raised.value.available == Decimal("25.000000")
+
+
+@pytest.mark.asyncio
+async def test_hold_then_release_returns_amount_to_unheld_funds(db):
+    org_id = await _org_and_credit(db)
+    adapter = NorthRouterBillingAdapter(db)
+    await adapter.hold(organization_id=org_id, amount=Decimal("10"))
+    await adapter.require_unheld_funds(organization_id=org_id)
+    await adapter.release_hold(organization_id=org_id, amount=Decimal("10"))
+    await adapter.hold(organization_id=org_id, amount=Decimal("25"))
+
+
+@pytest.mark.asyncio
+async def test_hold_beyond_unheld_funds_raises(db):
+    org_id = await _org_and_credit(db, Decimal("10"))
+    adapter = NorthRouterBillingAdapter(db)
+    await adapter.hold(organization_id=org_id, amount=Decimal("8"))
+    with pytest.raises(InsufficientFundsError) as raised:
+        await adapter.hold(organization_id=org_id, amount=Decimal("3"))
+    assert raised.value.available == Decimal("2.000000")
+
+
+@pytest.mark.asyncio
+async def test_charge_records_consume_in_overdraft(db):
+    org_id = await _org_and_credit(db, Decimal("2"))
+    adapter = NorthRouterBillingAdapter(db)
+    await adapter.charge(
+        organization_id=org_id,
+        amount=Decimal("5"),
+        billed=None,
+        tools=NO_TOOLS,
+        description="served request",
+    )
+    consume = await db.scalar(
+        select(NrLedgerEntry).where(NrLedgerEntry.type == "consume", NrLedgerEntry.description == "served request")
+    )
+    assert consume is not None
+    assert consume.amount == Decimal("5.000000")
+    with pytest.raises(InsufficientFundsError) as raised:
+        await adapter.require_funds_on_deposit(
+            organization_id=org_id, billed=None, tools=frozenset(), actor_user_id=None
+        )
+    assert raised.value.available == Decimal("-3.000000")
+
+
+@pytest.mark.asyncio
+async def test_due_subscription_credit_is_idempotent(db):
+    org_id = uuid.uuid4()
+    adapter = NorthRouterBillingAdapter(db)
+    org = await adapter._org(org_id)
+    db.add(
+        NrSubscription(
+            org_id=org.id,
+            stripe_subscription_id="sub_one",
+            plan="starter",
+            status="active",
+            current_period_end=datetime.now(UTC) + timedelta(days=30),
+            credit_amount=Decimal("100"),
+        )
+    )
+    await db.flush()
+    await adapter.apply_due_credit(organization_id=org_id)
+    await adapter.apply_due_credit(organization_id=org_id)
+    count = await db.scalar(
+        select(func.count())
+        .select_from(NrLedgerEntry)
+        .where(NrLedgerEntry.type == "grant", NrLedgerEntry.ref.like("subscription:%"))
+    )
+    assert count == 1
+
+
+@pytest.mark.asyncio
+async def test_e_transfer_approval_grants_and_rejection_does_not(db, monkeypatch):
+    monkeypatch.setenv("NORTHROUTER_BILLING_OPERATOR_TOKEN", "operator-secret")
+    org_id = uuid.uuid4()
+    pending = await submit_e_transfer(
+        ETransferRequest(organization_id=org_id, amount=Decimal("100"), reference="etransfer-1"),
+        db,
+        (None, True),
+    )
+    with pytest.raises(HTTPException) as denied:
+        await approve_e_transfer(uuid.UUID(pending["id"]), db, None)
+    assert denied.value.status_code == 403
+    await _review_e_transfer(uuid.UUID(pending["id"]), db, "operator-secret", approve=True)
+    approved = await db.scalar(select(NrETransfer).where(NrETransfer.id == uuid.UUID(pending["id"])))
+    assert approved is not None and approved.status == "approved"
+    approved_grant = await db.scalar(select(NrLedgerEntry).where(NrLedgerEntry.ref == f"etransfer:{pending['id']}"))
+    assert approved_grant is not None and approved_grant.amount == Decimal("100.000000")
+
+    rejected = await submit_e_transfer(
+        ETransferRequest(organization_id=org_id, amount=Decimal("500"), reference="etransfer-2"),
+        db,
+        (None, True),
+    )
+    await reject_e_transfer(uuid.UUID(rejected["id"]), db, "operator-secret")
+    rejected_grant = await db.scalar(select(NrLedgerEntry).where(NrLedgerEntry.ref == f"etransfer:{rejected['id']}"))
+    assert rejected_grant is None
+
+
+@pytest.mark.asyncio
+async def test_stripe_webhook_replay_grants_once(db, monkeypatch):
+    org_id = uuid.uuid4()
+    event = SimpleNamespace(
+        id="evt_payment",
+        type="payment_intent.succeeded",
+        data=SimpleNamespace(
+            object=SimpleNamespace(
+                id="pi_one",
+                amount_received=1250,
+                metadata={"organization_id": str(org_id)},
+            )
+        ),
+    )
+    monkeypatch.setattr(StripeClient, "construct_event", lambda self, payload, signature: event)
+
+    async def receive():
+        return {"type": "http.request", "body": b"{}", "more_body": False}
+
+    from starlette.requests import Request
+
+    request = Request(
+        {"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": b""},
+        receive,
+    )
+    await stripe_webhook(request, db, "signed")
+    await stripe_webhook(request, db, "signed")
+    count = await db.scalar(
+        select(func.count()).select_from(NrLedgerEntry).where(NrLedgerEntry.ref == "stripe-payment:pi_one")
+    )
+    assert count == 1
+    grant = await db.scalar(select(NrLedgerEntry).where(NrLedgerEntry.ref == "stripe-payment:pi_one"))
+    assert grant is not None and grant.amount == Decimal("12.500000")
+
+
+def test_bootstrap_binds_billing_port_without_shape_error():
+    container = build_container("northrouter_billing.overlay:register")
+    adapter = container.resolve(BillingPort, None)
+    assert all(hasattr(adapter, method) for method in get_protocol_members(BillingPort))
+    assert container.router_contributions()[0].capability == "northrouter_billing"
