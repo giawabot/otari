@@ -9,11 +9,14 @@ description = "NorthRouter billing overlay for Otari"
 requires-python = ">=3.13"
 dependencies = [
     "alembic>=1.13",
-    "httpx>=0.28",
+    "fastapi>=0.115",
     "pydantic>=2",
     "sqlalchemy[asyncio]>=2",
     "stripe>=11",
 ]
+
+[project.optional-dependencies]
+test = ["pytest", "pytest-asyncio", "aiosqlite"]
 
 [tool.setuptools.packages.find]
 where = ["."]

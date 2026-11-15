@@ -9,14 +9,16 @@ from typing import get_protocol_members
 import pytest
 from fastapi import HTTPException
 from northrouter_billing.adapter import NorthRouterBillingAdapter
-from northrouter_billing.models import NrETransfer, NrLedgerEntry, NrOrg, NrSubscription
+from northrouter_billing.models import NrETransfer, NrHold, NrLedgerEntry, NrOrg, NrSubscription
 from northrouter_billing.routes import (
     ETransferRequest,
+    _handle_stripe_event,
     _review_e_transfer,
     approve_e_transfer,
     reject_e_transfer,
     stripe_webhook,
     submit_e_transfer,
+    sweep_holds,
 )
 from northrouter_billing.stripe_client import StripeClient
 from sqlalchemy import func, select
@@ -63,6 +65,9 @@ async def test_suspended_organization_is_refused(db):
             organization_id=org_id, billed=None, tools=frozenset(), actor_user_id=None
         )
     assert raised.value.available == Decimal("25.000000")
+    assert raised.value.public_message == (
+        "This organization is suspended; contact billing@northrouter.ca to restore service."
+    )
 
 
 @pytest.mark.asyncio
@@ -86,6 +91,15 @@ async def test_hold_beyond_unheld_funds_raises(db):
 
 
 @pytest.mark.asyncio
+async def test_zero_hold_is_a_noop(db):
+    org_id = await _org_and_credit(db)
+    adapter = NorthRouterBillingAdapter(db)
+    await adapter.hold(organization_id=org_id, amount=Decimal("0"))
+    count = await db.scalar(select(func.count()).select_from(NrHold))
+    assert count == 0
+
+
+@pytest.mark.asyncio
 async def test_charge_records_consume_in_overdraft(db):
     org_id = await _org_and_credit(db, Decimal("2"))
     adapter = NorthRouterBillingAdapter(db)
@@ -106,6 +120,135 @@ async def test_charge_records_consume_in_overdraft(db):
             organization_id=org_id, billed=None, tools=frozenset(), actor_user_id=None
         )
     assert raised.value.available == Decimal("-3.000000")
+
+
+@pytest.mark.asyncio
+async def test_negative_charge_is_rejected(db):
+    org_id = await _org_and_credit(db)
+    with pytest.raises(ValueError, match="cannot be negative"):
+        await NorthRouterBillingAdapter(db).charge(
+            organization_id=org_id,
+            amount=Decimal("-1"),
+            billed=None,
+            tools=NO_TOOLS,
+        )
+
+
+@pytest.mark.asyncio
+async def test_created_subscription_grants_first_period_once(db):
+    org_id = uuid.uuid4()
+    org = await NorthRouterBillingAdapter(db)._org(org_id)
+    period_end = int((datetime.now(UTC) + timedelta(days=30)).timestamp())
+    await _handle_stripe_event(
+        db,
+        "customer.subscription.created",
+        {
+            "id": "sub_first_period",
+            "customer": "cus_first_period",
+            "status": "active",
+            "current_period_end": period_end,
+            "metadata": {
+                "organization_id": str(org_id),
+                "plan": "starter",
+                "credit_amount": "100",
+            },
+        },
+    )
+    subscription = await db.scalar(
+        select(NrSubscription).where(NrSubscription.stripe_subscription_id == "sub_first_period")
+    )
+    assert subscription is not None and subscription.org_id == org.id
+
+    adapter = NorthRouterBillingAdapter(db)
+    await adapter.apply_due_credit(organization_id=org_id)
+    await adapter.apply_due_credit(organization_id=org_id)
+    grants = await db.scalar(
+        select(func.count())
+        .select_from(NrLedgerEntry)
+        .where(NrLedgerEntry.ref.like("subscription:sub_first_period:%"))
+    )
+    assert grants == 1
+
+
+@pytest.mark.asyncio
+async def test_invoice_failure_suspends_and_success_reactivates(db):
+    org_id = await _org_and_credit(db)
+    org = await db.scalar(select(NrOrg).where(NrOrg.otari_org_id == org_id))
+    assert org is not None
+    org.stripe_customer_id = "cus_invoice"
+
+    await _handle_stripe_event(db, "invoice.payment_failed", {"customer": "cus_invoice"})
+    with pytest.raises(InsufficientFundsError) as raised:
+        await NorthRouterBillingAdapter(db).require_funds_on_deposit(
+            organization_id=org_id, billed=None, tools=frozenset(), actor_user_id=None
+        )
+    assert raised.value.public_message == (
+        "This organization is suspended; contact billing@northrouter.ca to restore service."
+    )
+
+    await _handle_stripe_event(db, "invoice.payment_succeeded", {"customer": "cus_invoice"})
+    await NorthRouterBillingAdapter(db).require_funds_on_deposit(
+        organization_id=org_id, billed=None, tools=frozenset(), actor_user_id=None
+    )
+    assert org.status == "active"
+
+
+@pytest.mark.asyncio
+async def test_refund_cumulative_amount_is_idempotent_and_charge_id_is_literal(db):
+    org_id = await _org_and_credit(db, Decimal("25"))
+    org = await db.scalar(select(NrOrg).where(NrOrg.otari_org_id == org_id))
+    assert org is not None
+    db.add(
+        NrLedgerEntry(
+            org_id=org.id,
+            type="refund",
+            amount=Decimal("-3"),
+            ref="stripe-refund:chX1:10.000000",
+        )
+    )
+    event = {
+        "id": "ch_1",
+        "payment_intent": "pi_refund",
+        "amount_refunded": 500,
+        "metadata": {"organization_id": str(org_id)},
+    }
+    await _handle_stripe_event(db, "charge.refunded", event)
+    await _handle_stripe_event(db, "charge.refunded", event)
+    own_refunds = await db.scalars(
+        select(NrLedgerEntry).where(
+            NrLedgerEntry.type == "refund",
+            NrLedgerEntry.ref.like("stripe-refund:ch\\_1:%", escape="\\"),
+        )
+    )
+    refunds = list(own_refunds)
+    assert len(refunds) == 1
+    assert refunds[0].amount == Decimal("-5.000000")
+
+
+@pytest.mark.asyncio
+async def test_expired_hold_does_not_reduce_funds_and_operator_sweep_releases_it(db, monkeypatch):
+    monkeypatch.setenv("NORTHROUTER_BILLING_OPERATOR_TOKEN", "operator-secret")
+    org_id = await _org_and_credit(db)
+    org = await db.scalar(select(NrOrg).where(NrOrg.otari_org_id == org_id))
+    assert org is not None
+    created_at = datetime.now(UTC) - timedelta(hours=2)
+    hold = NrHold(
+        org_id=org.id,
+        amount=Decimal("20"),
+        state="open",
+        created_at=created_at,
+        expires_at=created_at + timedelta(hours=1),
+    )
+    db.add(hold)
+    await db.flush()
+
+    await NorthRouterBillingAdapter(db).require_unheld_funds(organization_id=org_id)
+    result = await sweep_holds(db, "operator-secret")
+    assert result == {"released": 1}
+    await db.refresh(hold)
+    assert hold.state == "released"
+    release = await db.scalar(select(NrLedgerEntry).where(NrLedgerEntry.ref == f"release:{hold.id}"))
+    assert release is not None and release.amount == Decimal("20.000000")
 
 
 @pytest.mark.asyncio

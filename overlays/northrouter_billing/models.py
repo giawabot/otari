@@ -95,6 +95,7 @@ class NrHold(BillingBase):
     amount: Mapped[Decimal] = mapped_column(UsdAmount(), nullable=False)
     state: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     ref: Mapped[str | None] = mapped_column(String(255))
 

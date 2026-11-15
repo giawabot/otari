@@ -3,8 +3,10 @@
 Install the package into the Otari environment:
 
 ```bash
-/home/giawa/otari-billing/.venv/bin/python -m pip install -e /home/giawa/northrouter/otari_overlays
+/home/giawa/otari-billing/.venv/bin/python -m pip install -e overlays/
 ```
+
+A development worktree copy also exists at `/home/giawa/northrouter/otari_overlays`.
 
 Configure the overlay in the server environment, not `config.yml`:
 
@@ -18,9 +20,9 @@ NORTHROUTER_STRIPE_PRICE_SCALE=...
 NORTHROUTER_BILLING_OPERATOR_TOKEN=...
 ```
 
-The operator token protects e-transfer approval and rejection. Stripe credentials
-are used only by the billing HTTP routes and webhook handler. Never put card data
-or these secrets in logs.
+The operator token protects e-transfer approval and rejection and the hold sweep.
+Stripe credentials are used only by the billing HTTP routes and webhook handler.
+Never put card data or these secrets in logs.
 
 Run the overlay's independent migration chain against the same database used by
 Otari:
@@ -28,7 +30,7 @@ Otari:
 ```bash
 NORTHROUTER_DATABASE_URL=sqlite+aiosqlite:///./otari.db \
   /home/giawa/otari-billing/.venv/bin/python -m alembic \
-  -c /home/giawa/northrouter/otari_overlays/northrouter_billing/alembic.ini upgrade head
+  -c overlays/northrouter_billing/alembic.ini upgrade head
 ```
 
 For PostgreSQL, set `NORTHROUTER_DATABASE_URL` to its Otari database URL. The
@@ -49,6 +51,7 @@ All routes mount under `/api/v1/nr/billing`, gated on the
 | `POST /e-transfers` | API key or master key |
 | `POST /e-transfers/{id}/approve` | `NorthRouter-Operator-Token` header |
 | `POST /e-transfers/{id}/reject` | `NorthRouter-Operator-Token` header |
+| `POST /holds/sweep` | `NorthRouter-Operator-Token` header |
 | `GET /orgs/{org}/ledger?limit=` | API key or master key |
 
 A deployment-paid request for an org with no paid-in funds is refused by the

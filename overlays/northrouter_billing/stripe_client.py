@@ -23,11 +23,14 @@ class StripeClient:
             raise RuntimeError("NORTHROUTER_STRIPE_WEBHOOK_SECRET is not configured")
         return value
 
-    def create_customer(self, *, organization_id: str, email: str | None = None) -> Any:
+    def create_customer(
+        self, *, organization_id: str, email: str | None = None, idempotency_key: str | None = None
+    ) -> Any:
         return stripe.Customer.create(
             api_key=self.secret_key,
             metadata={"organization_id": organization_id},
             email=email,
+            idempotency_key=idempotency_key,
         )
 
     def create_payment_intent(

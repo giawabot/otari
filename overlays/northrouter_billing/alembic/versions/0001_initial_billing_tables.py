@@ -22,7 +22,6 @@ def upgrade() -> None:
         sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False),
         sa.CheckConstraint("status IN ('active', 'suspended')", name="ck_nr_orgs_status"),
         sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("otari_org_id"),
     )
     op.create_index("ix_nr_orgs_otari_org_id", "nr_orgs", ["otari_org_id"], unique=True)
     op.create_table(

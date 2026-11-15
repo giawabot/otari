@@ -3,10 +3,10 @@
 import json
 import uuid
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, select, update
+from sqlalchemy import func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -15,6 +15,10 @@ from gateway.ports.billing_port import BilledModel, BillingPort, InsufficientFun
 from northrouter_billing.models import NrHold, NrLedgerEntry, NrOrg, NrSubscription, _money
 
 _PAID_IN_TYPES = ("grant", "refund", "invoice")
+# Passthrough commits the hold before provider dispatch, so a crash before
+# release must not strand funds forever.
+_HOLD_TTL = timedelta(hours=1)
+_SUSPENDED_MESSAGE = "This organization is suspended; contact billing@northrouter.ca to restore service."
 
 
 async def _insert_if_absent(
@@ -78,7 +82,11 @@ class NorthRouterBillingAdapter(BillingPort):
             )
         )
         held = await session.scalar(
-            select(func.coalesce(func.sum(NrHold.amount), 0)).where(NrHold.org_id == org_id, NrHold.state == "open")
+            select(func.coalesce(func.sum(NrHold.amount), 0)).where(
+                NrHold.org_id == org_id,
+                NrHold.state == "open",
+                or_(NrHold.expires_at.is_(None), NrHold.expires_at > datetime.now(UTC)),
+            )
         )
         return _money(paid_in or 0), _money(consumed or 0), _money(held or 0)
 
@@ -86,7 +94,9 @@ class NorthRouterBillingAdapter(BillingPort):
         org = await self._org(organization_id)
         paid_in, consumed, _ = await self._amounts(org.id)
         available = _money(paid_in - consumed)
-        if org.status != "active" or available <= 0:
+        if org.status != "active":
+            raise InsufficientFundsError(available, _SUSPENDED_MESSAGE)
+        if available <= 0:
             raise InsufficientFundsError(available)
         return org, available
 
@@ -172,13 +182,15 @@ class NorthRouterBillingAdapter(BillingPort):
         org = await self._org(organization_id)
         paid_in, consumed, held = await self._amounts(org.id)
         available = _money(paid_in - consumed - held)
-        if org.status != "active" or available <= 0:
+        if org.status != "active":
+            raise InsufficientFundsError(available, _SUSPENDED_MESSAGE)
+        if available <= 0:
             raise InsufficientFundsError(available)
 
     async def hold(self, *, organization_id: uuid.UUID, amount: Decimal) -> None:
         amount = _money(amount)
         if amount <= 0:
-            raise ValueError("A hold amount must be positive")
+            return
         org = await self._org(organization_id)
         # The no-op timestamp update obtains the organization row lock on
         # PostgreSQL and the SQLite write lock before the balance is checked.
@@ -188,7 +200,12 @@ class NorthRouterBillingAdapter(BillingPort):
         available = _money(paid_in - consumed - held)
         if org.status != "active" or available < amount:
             raise InsufficientFundsError(available)
-        hold = NrHold(org_id=org.id, amount=amount, state="open")
+        hold = NrHold(
+            org_id=org.id,
+            amount=amount,
+            state="open",
+            expires_at=datetime.now(UTC) + _HOLD_TTL,
+        )
         session.add(hold)
         await session.flush()
         hold.ref = f"hold:{hold.id}"
@@ -200,9 +217,15 @@ class NorthRouterBillingAdapter(BillingPort):
         session = self._session()
         hold = await session.scalar(
             select(NrHold)
-            .where(NrHold.org_id == org.id, NrHold.amount == amount, NrHold.state == "open")
+            .where(
+                NrHold.org_id == org.id,
+                NrHold.amount == amount,
+                NrHold.state == "open",
+                or_(NrHold.expires_at.is_(None), NrHold.expires_at > datetime.now(UTC)),
+            )
             .order_by(NrHold.created_at, NrHold.id)
             .limit(1)
+            .with_for_update(skip_locked=True)
         )
         if hold is None:
             raise ValueError("No open hold matches this amount")
@@ -222,6 +245,8 @@ class NorthRouterBillingAdapter(BillingPort):
         actor_user_id: uuid.UUID | None = None,
         api_key_id: str | None = None,
     ) -> None:
+        if amount < 0:
+            raise ValueError("A charge amount cannot be negative")
         org = await self._org(organization_id)
         audit = {
             "billed": (
