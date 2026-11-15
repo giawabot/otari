@@ -55,7 +55,6 @@ class ProviderSovereignty(PrimaryKeyMixin, CreatedAtMixin, UpdatedAtMixin, table
             name="uq_provider_sovereignty_org_provider_model",
         ),
         Index("ix_provider_sovereignty_provider", "provider"),
-        Index("ix_provider_sovereignty_organization", "organization_id"),
     )
 
     # None = deployment-wide attestation; set = this organization's own view.

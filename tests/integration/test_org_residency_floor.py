@@ -16,9 +16,8 @@ from typing import Any, cast
 from unittest.mock import patch
 
 import pytest
+from any_llm.types.completion import ChatCompletion, ChatCompletionMessage, CompletionUsage
 from fastapi.testclient import TestClient
-from openai.types.chat import ChatCompletion, ChatCompletionMessage
-from openai.types.completion_usage import CompletionUsage
 from sqlalchemy import select, update
 from sqlmodel import col
 
@@ -47,13 +46,13 @@ def floor_config(postgres_url: str) -> GatewayConfig:
                 "provider_type": "openai",
                 "api_base": "https://plain.example/v1",
                 "api_key": "***",
-                "models": ["m"],
+                "models": ["plain-m"],
             },
             "sovbox": {
                 "provider_type": "openai",
                 "api_base": "https://sov.example/v1",
                 "api_key": "***",
-                "models": ["m"],
+                "models": ["sov-m"],
                 "sovereignty": {"level": 3, "hosted_in": "CA", "operator_jurisdiction": "CA"},
             },
         },
@@ -128,7 +127,7 @@ def test_floor_refuses_a_non_sovereign_model_for_an_unrestricted_key(
 ) -> None:
     api_key_header = _mint_key_header(floor_client, master_key_header)
     _set_floor(db_session_factory, "sovereign")
-    response = _chat(floor_client, api_key_header, "plainbox:m")
+    response = _chat(floor_client, api_key_header, "plainbox:plain-m")
     assert response.status_code == 403
     # The refusal names the organization as the source, not a caller-supplied bar.
     assert "This organization's residency policy" in response.text
@@ -141,7 +140,7 @@ def test_floor_still_serves_a_model_that_clears_it(
 ) -> None:
     api_key_header = _mint_key_header(floor_client, master_key_header)
     _set_floor(db_session_factory, "sovereign")
-    response = _chat(floor_client, api_key_header, "sovbox:m")
+    response = _chat(floor_client, api_key_header, "sovbox:sov-m")
     assert response.status_code == 200, response.text
     # The audit row carries the floor as the bar's source, with no request bar.
     session = db_session_factory()
@@ -168,7 +167,7 @@ def test_request_bar_still_raises_above_the_floor(
     # Floor 'domestic' (2) + request 'sovereign_model' (4): level 4 binds,
     # and the level-3 attestation no longer clears it.
     _set_floor(db_session_factory, "domestic")
-    response = _chat(floor_client, api_key_header, "sovbox:m", residency="sovereign_model")
+    response = _chat(floor_client, api_key_header, "sovbox:sov-m", residency="sovereign_model")
     assert response.status_code == 403
     assert "Residency policy 'sovereign_model'" in response.text
 
@@ -178,7 +177,7 @@ def test_no_floor_leaves_behavior_unchanged(
     master_key_header: dict[str, str],
 ) -> None:
     api_key_header = _mint_key_header(floor_client, master_key_header)
-    response = _chat(floor_client, api_key_header, "plainbox:m")
+    response = _chat(floor_client, api_key_header, "plainbox:plain-m")
     assert response.status_code == 200
 
 
@@ -197,8 +196,8 @@ def test_catalog_honors_the_floor_without_the_query_param(
     response = floor_client.get(f"{API_ROOT}/models", headers=api_key_header)
     assert response.status_code == 200
     ids = {m["id"] for m in response.json()["data"]}
-    assert any("sovbox" in mid for mid in ids)
-    assert not any("plainbox" in mid for mid in ids)
+    assert "sov-m" in ids
+    assert "plain-m" not in ids
 
 
 def test_catalog_without_floor_lists_both(
@@ -209,8 +208,8 @@ def test_catalog_without_floor_lists_both(
     response = floor_client.get(f"{API_ROOT}/models", headers=api_key_header)
     assert response.status_code == 200
     ids = {m["id"] for m in response.json()["data"]}
-    assert any("sovbox" in mid for mid in ids)
-    assert any("plainbox" in mid for mid in ids)
+    assert "sov-m" in ids
+    assert "plain-m" in ids
 
 
 # =============================================================================

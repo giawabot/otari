@@ -44,20 +44,13 @@ def upgrade() -> None:
         sa.UniqueConstraint("organization_id", "provider", "model", name="uq_provider_sovereignty_org_provider_model"),
     )
     op.create_index("ix_provider_sovereignty_provider", "provider_sovereignty", ["provider"])
-    op.create_index("ix_provider_sovereignty_organization", "provider_sovereignty", ["organization_id"])
-    op.create_index(
-        op.f("ix_provider_sovereignty_id"),
-        "provider_sovereignty",
-        ["id"],
-        unique=False,
-    )
+    op.create_index("ix_provider_sovereignty_organization_id", "provider_sovereignty", ["organization_id"])
     op.add_column("usage_logs", sa.Column("residency_audit", sa.JSON(), nullable=True))
 
 
 def downgrade() -> None:
     """Downgrade schema."""
     op.drop_column("usage_logs", "residency_audit")
-    op.drop_index("ix_provider_sovereignty_id", table_name="provider_sovereignty")
-    op.drop_index("ix_provider_sovereignty_organization", table_name="provider_sovereignty")
+    op.drop_index("ix_provider_sovereignty_organization_id", table_name="provider_sovereignty")
     op.drop_index("ix_provider_sovereignty_provider", table_name="provider_sovereignty")
     op.drop_table("provider_sovereignty")

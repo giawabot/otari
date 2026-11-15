@@ -59,5 +59,10 @@ class SovereigntyService:
         *,
         organization_id: uuid.UUID | None = None,
     ) -> list[ProviderSovereignty]:
-        """Attestation rows visible to one organization (deployment-wide + own)."""
-        return await list_sovereignty_rows(uow, organization_id=organization_id)
+        """Attestation rows visible to one organization (deployment-wide + own).
+
+        Opens a Unit of Work block: repositories read through the block's
+        session, and a bare Unit of Work with no open block refuses it.
+        """
+        async with uow:
+            return await list_sovereignty_rows(uow, organization_id=organization_id)

@@ -376,6 +376,8 @@ def test_list_usage_response_shape(
         "request_group_id": None,
         # Null because no stream was cut.
         "stream_cut_by": None,
+        # Null because the request carried no residency bar.
+        "residency_audit": None,
     }
 
 
