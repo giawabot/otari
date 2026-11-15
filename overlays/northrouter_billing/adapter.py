@@ -18,7 +18,7 @@ _PAID_IN_TYPES = ("grant", "refund", "invoice")
 # Passthrough commits the hold before provider dispatch, so a crash before
 # release must not strand funds forever.
 _HOLD_TTL = timedelta(hours=1)
-_SUSPENDED_MESSAGE = "This organization is suspended; contact billing@northrouter.ca to restore service."
+_SUSPENDED_MESSAGE = "This organization is suspended; sign in at northrouter.ca to review your account details."
 
 
 async def _insert_if_absent(

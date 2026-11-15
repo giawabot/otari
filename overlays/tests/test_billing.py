@@ -66,7 +66,7 @@ async def test_suspended_organization_is_refused(db):
         )
     assert raised.value.available == Decimal("25.000000")
     assert raised.value.public_message == (
-        "This organization is suspended; contact billing@northrouter.ca to restore service."
+        "This organization is suspended; sign in at northrouter.ca to review your account details."
     )
 
 
@@ -183,7 +183,7 @@ async def test_invoice_failure_suspends_and_success_reactivates(db):
             organization_id=org_id, billed=None, tools=frozenset(), actor_user_id=None
         )
     assert raised.value.public_message == (
-        "This organization is suspended; contact billing@northrouter.ca to restore service."
+        "This organization is suspended; sign in at northrouter.ca to review your account details."
     )
 
     await _handle_stripe_event(db, "invoice.payment_succeeded", {"customer": "cus_invoice"})
