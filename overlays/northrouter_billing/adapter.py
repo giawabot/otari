@@ -17,6 +17,26 @@ from northrouter_billing.models import NrHold, NrLedgerEntry, NrOrg, NrSubscript
 _PAID_IN_TYPES = ("grant", "refund", "invoice")
 
 
+async def _insert_if_absent(
+    session: AsyncSession, model: type, values: dict[str, object], conflict_columns: list[str]
+) -> None:
+    """Insert a row unless a concurrent writer already claimed the conflict key.
+
+    ``on_conflict_do_nothing`` is a dialect-specific construct, so the sqlite
+    and postgresql insert variants are chosen from the bound dialect; other
+    dialects fall back to a plain ORM insert, which is safe under the
+    single-writer guarantees those deployments make.
+    """
+    dialect = session.get_bind().dialect.name
+    if dialect in ("sqlite", "postgresql"):
+        insert = sqlite_insert if dialect == "sqlite" else pg_insert
+        statement = insert(model).values(**values).on_conflict_do_nothing(index_elements=conflict_columns)
+        await session.execute(statement)
+    else:
+        session.add(model(**values))
+        await session.flush()
+
+
 class NorthRouterBillingAdapter(BillingPort):
     """Billing adapter whose writes remain part of Otari's request transaction."""
 
@@ -34,20 +54,12 @@ class NorthRouterBillingAdapter(BillingPort):
         if org is not None:
             return org
 
-        values = {"id": uuid.uuid4(), "otari_org_id": organization_id, "status": "active"}
-        dialect = session.get_bind().dialect.name
-        if dialect == "sqlite":
-            statement = sqlite_insert(NrOrg).values(**values).on_conflict_do_nothing(index_elements=["otari_org_id"])
-        elif dialect == "postgresql":
-            statement = pg_insert(NrOrg).values(**values).on_conflict_do_nothing(index_elements=["otari_org_id"])
-        else:
-            session.add(NrOrg(**values))
-            await session.flush()
-            org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
-            if org is None:
-                raise RuntimeError("Organization insert did not produce a billing row")
-            return org
-        await session.execute(statement)
+        await _insert_if_absent(
+            session,
+            NrOrg,
+            {"id": uuid.uuid4(), "otari_org_id": organization_id, "status": "active"},
+            ["otari_org_id"],
+        )
         org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
         if org is None:
             raise RuntimeError("Organization insert did not produce a billing row")
@@ -94,28 +106,18 @@ class NorthRouterBillingAdapter(BillingPort):
                 select(NrLedgerEntry.id).where(NrLedgerEntry.type == "grant", NrLedgerEntry.ref == ref)
             )
             if exists is None:
-                values = {
-                    "org_id": org.id,
-                    "type": "grant",
-                    "amount": subscription.credit_amount,
-                    "ref": ref,
-                    "description": f"Subscription credit for {subscription.plan}",
-                }
-                dialect = session.get_bind().dialect.name
-                if dialect == "sqlite":
-                    statement = (
-                        sqlite_insert(NrLedgerEntry)
-                        .values(**values)
-                        .on_conflict_do_nothing(index_elements=["type", "ref"])
-                    )
-                elif dialect == "postgresql":
-                    statement = (
-                        pg_insert(NrLedgerEntry).values(**values).on_conflict_do_nothing(index_elements=["type", "ref"])
-                    )
-                else:
-                    session.add(NrLedgerEntry(**values))
-                    continue
-                await session.execute(statement)
+                await _insert_if_absent(
+                    session,
+                    NrLedgerEntry,
+                    {
+                        "org_id": org.id,
+                        "type": "grant",
+                        "amount": subscription.credit_amount,
+                        "ref": ref,
+                        "description": f"Subscription credit for {subscription.plan}",
+                    },
+                    ["type", "ref"],
+                )
         await session.flush()
 
     async def require_funds_on_deposit(
