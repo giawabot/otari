@@ -122,6 +122,7 @@ from gateway.services.mail import Mailer
 from gateway.services.organizations import BlockedAddresses, InvitationMailLimit, SsoEnforcement
 from gateway.services.password_service import hash_password_async
 from gateway.services.secret_box import secret_box_configured
+from gateway.services.sovereignty import SovereigntyService
 from gateway.services.tenancy.deployment_user_service import DeploymentAdministrationAccess
 from gateway.services.tenancy.email_address import validated_email as _validated_email
 from gateway.services.tenancy.invitation_email import render_invitation_email
@@ -672,6 +673,10 @@ class OrganizationService:
     async def get_organization_id_for_workspace(self, workspace_id: uuid.UUID) -> uuid.UUID | None:
         """Return the ID of the organization that owns a workspace, or None when the workspace does not exist."""
         return await self.workspace_rows.get_organization_id(workspace_id)
+
+    async def get_residency_floor(self, organization_id: uuid.UUID | None) -> str | None:
+        """Return an organization's residency floor, or None when it has none."""
+        return await self.organizations.get_residency_floor(organization_id)
 
     async def billing_user_id(self, user_id: str | None) -> str:
         """Return the id of the billing user ``user_id`` names, creating it, or reviving it, when needed.
@@ -1245,6 +1250,28 @@ class OrganizationService:
             organization=updated,
             workspace_memberships=await self._caller_workspace_memberships(user=user, organization=updated),
         )
+
+    async def update_residency_floor_for_user(
+        self,
+        *,
+        user: User,
+        residency_floor: str | None,
+    ) -> OrganizationPublic:
+        """Set or clear the caller's organization's residency floor."""
+        organization = await self.get_active_organization_for_user(user)
+        await self.require_active_organization_management_access(user=user, organization=organization)
+
+        normalized: str | None = None
+        if residency_floor is not None:
+            try:
+                SovereigntyService.parse_bar(residency_floor)
+            except ValueError as exc:
+                raise TenancyValidationError(str(exc)) from exc
+            normalized = residency_floor.strip().lower()
+
+        updated = await self.organizations.update_organization(organization, {"residency_floor": normalized})
+        await self.db.commit()
+        return OrganizationPublic.model_validate(updated)
 
     async def delete_active_organization_for_user(
         self, *, user: User, sso_enforcement: SsoEnforcement

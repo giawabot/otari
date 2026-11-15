@@ -132,6 +132,10 @@ async def _resolve(config: GatewayConfig) -> pipeline.RequestContext:
             "app": app,
         }
     )
+
+    async def no_residency_floor(_organization_id: uuid.UUID | None) -> None:
+        return None
+
     return await pipeline.resolve_request_context(
         adapter=chat._ADAPTER,
         raw_request=request,
@@ -148,6 +152,7 @@ async def _resolve(config: GatewayConfig) -> pipeline.RequestContext:
         user_forbidden_detail="forbidden",
         code_execution_policies=cast(WorkspaceCodeExecutionPolicies, object()),
         model_provider=cast(ModelProviderPort, object()),
+        organization_service=cast(Any, SimpleNamespace(get_residency_floor=no_residency_floor)),
         normalize_messages=_normalize_with_vision,
     )
 

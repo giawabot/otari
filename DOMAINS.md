@@ -122,6 +122,15 @@ Ceilings, reservations, reset periods and per-member policies.
 vocabularies, with the columns they name, and the schemas and services import
 them from there.
 
+### sovereignty
+
+Provider residency attestations and the per-request bars that filter routing
+candidates: the four sovereignty levels, the `residency` request param, and the
+routing audit of which level served a request.
+
+`services/sovereignty/access.py` holds the pure resolver; routing and the
+pipeline consult it, and `repositories/sovereignty/` loads the attestation rows.
+
 ### pricing
 
 The deployment price list, organization rate overrides and upstream price

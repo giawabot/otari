@@ -26,6 +26,7 @@ from gateway.api.deps import (
     BillingPortDep,
     ModelProviderPortDep,
     OptionalFileServiceDep,
+    OrganizationServiceDep,
     ToolPortsDep,
     build_sandbox_container_registry,
     build_sandbox_file_bridge,
@@ -64,7 +65,12 @@ from gateway.api.routes._request_tags import (
     RequestTagsHeader,
     resolved_tags,
 )
-from gateway.api.routes._schema_derive import SESSION_LABEL_DESC, SESSION_LABEL_MAX_LENGTH, derive_request_base
+from gateway.api.routes._schema_derive import (
+    RESIDENCY_DESC,
+    SESSION_LABEL_DESC,
+    SESSION_LABEL_MAX_LENGTH,
+    derive_request_base,
+)
 from gateway.api.routes._tools import _strip_gateway_fields
 from gateway.core.config import GatewayConfig
 from gateway.core.error_codes import INVALID_REQUEST, ErrorKind, body_fields_of, error_headers
@@ -277,6 +283,8 @@ class MessagesRequest(derive_request_base(MessagesParams)):  # type: ignore[misc
     tools_header: str | None = None
     max_tool_iterations: int | None = Field(default=None, ge=1, le=MAX_TOOL_ITERATIONS_CAP)
     session_label: str | None = Field(default=None, max_length=SESSION_LABEL_MAX_LENGTH, description=SESSION_LABEL_DESC)
+    # Gateway-internal residency bar; enforced before dispatch and never forwarded.
+    residency: str | None = Field(default=None, max_length=32, description=RESIDENCY_DESC)
     metadata: AnthropicRequestMetadata = None
     # Declared so the published contract carries Anthropic's wire name; the
     # validator below moves it into ``output_format``, so it is never set or forwarded.
@@ -945,6 +953,7 @@ async def create_message(
     config: Annotated[GatewayConfig, Depends(get_config)],
     log_writer: Annotated[LogWriter, Depends(get_log_writer)],
     model_provider: ModelProviderPortDep,
+    organization_service: OrganizationServiceDep,
     billing: BillingPortDep,
     tool_ports: ToolPortsDep,
     idempotency: IdempotencyGuardDep,
@@ -1042,10 +1051,12 @@ async def create_message(
             user_forbidden_detail=_USER_FORBIDDEN,
             streaming=bool(request.stream),
             routing_signal=lambda: routing_signal(raw_request),
+            residency=request.residency,
             normalize_messages=_normalize,
             tools=request.tools,
             code_execution_policies=tool_ports.code_execution_policy,
             model_provider=model_provider,
+            organization_service=organization_service,
             idempotency=None if request.stream else idempotency,
             tags=resolved_tags(tags_header, request.metadata, ignore=frozenset({ANTHROPIC_USER_KEY})),
             turn=read_turn("messages", request.messages),

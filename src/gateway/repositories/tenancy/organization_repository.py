@@ -90,6 +90,21 @@ class OrganizationRepository(BaseRepository[Organization, OrganizationCreate, Or
         await self.db.refresh(organization)
         return organization
 
+    async def get_residency_floor(self, organization_id: uuid.UUID | None) -> str | None:
+        """The organization's residency floor, or None (no floor).
+
+        A single indexed read on the primary key. A missing organization
+        reads as no floor rather than raising: the request path must not
+        fail on tenancy data when the answer it needs is "unconstrained".
+        """
+        if organization_id is None:
+            return None
+        result = await self.db.execute(
+            select(col(Organization.residency_floor)).where(col(Organization.id) == organization_id)
+        )
+        floor: str | None = result.scalars().first()
+        return floor
+
     async def update_organization(
         self,
         organization: Organization,

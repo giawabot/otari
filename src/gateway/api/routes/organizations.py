@@ -66,6 +66,7 @@ from gateway.models.tenancy import (
     OrganizationMembershipContextPublic,
     OrganizationPublic,
     PendingOrganizationInvitationsPublic,
+    ResidencyFloorUpdateRequest,
     SwitchActiveOrganizationRequest,
 )
 from gateway.schemas.organizations import OrganizationRefusal
@@ -153,6 +154,27 @@ async def update_active_organization(
     return await service.update_active_organization_for_user(
         user=current_identity,
         organization_name=body.name,
+    )
+
+
+@router.put("/me/residency-floor")
+async def set_active_organization_residency_floor(
+    service: MembershipOrganizationServiceDep,
+    current_identity: CurrentIdentity,
+    body: ResidencyFloorUpdateRequest,
+) -> OrganizationPublic:
+    """Set or clear the caller's organization's residency floor.
+
+    Organization owners and admins only. The floor binds every request made
+    with the organization's keys: the effective bar is
+    ``max(request_bar, org_floor)``, so a member can raise the requirement
+    from a request but never lower the floor, and a key with no
+    ``allowed_models`` restriction is not exempt. Pass ``residency_floor:
+    null`` to clear it.
+    """
+    return await service.update_residency_floor_for_user(
+        user=current_identity,
+        residency_floor=body.residency_floor,
     )
 
 

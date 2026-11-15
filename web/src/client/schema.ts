@@ -4502,6 +4502,33 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/organizations/me/residency-floor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        /**
+         * Set Active Organization Residency Floor
+         * @description Set or clear the caller's organization's residency floor.
+         *
+         *     Organization owners and admins only. The floor binds every request made
+         *     with the organization's keys: the effective bar is
+         *     ``max(request_bar, org_floor)``, so a member can raise the requirement
+         *     from a request but never lower the floor, and a key with no
+         *     ``allowed_models`` restriction is not exempt. Pass ``residency_floor:
+         *     null`` to clear it.
+         */
+        put: operations["organizations-set_active_organization_residency_floor"];
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/organizations/me/routing-policies": {
         parameters: {
             query?: never;
@@ -10851,6 +10878,11 @@ export interface components {
              * @default auto
              */
             reasoning_effort: ("none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | "auto") | null;
+            /**
+             * Residency
+             * @description Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
+             */
+            residency?: string | null;
             /** Response Format */
             response_format?: {
                 [key: string]: unknown;
@@ -14982,6 +15014,11 @@ export interface components {
             } | null;
             /** Prompt Cache Key */
             prompt_cache_key?: string | null;
+            /**
+             * Residency
+             * @description Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
+             */
+            residency?: string | null;
             /** Service Tier */
             service_tier?: string | null;
             /**
@@ -16914,6 +16951,8 @@ export interface components {
             id: string;
             /** Name */
             name: string;
+            /** Residency Floor */
+            residency_floor?: string | null;
             /** Slug */
             slug: string;
             /** Updated At */
@@ -18806,6 +18845,19 @@ export interface components {
             token: string;
         };
         /**
+         * ResidencyFloorUpdateRequest
+         * @description Set or clear the organization's residency floor (NorthRouter plan 01b).
+         *
+         *     ``residency_floor`` is a bar name ("domestic", "sovereign",
+         *     "sovereign_model") or null for no floor. An unknown name is refused
+         *     rather than silently treated as no floor: a typo in a compliance
+         *     control must fail loudly.
+         */
+        ResidencyFloorUpdateRequest: {
+            /** Residency Floor */
+            residency_floor?: string | null;
+        };
+        /**
          * ResourceLink
          * @description A resource that the server is capable of reading, included in a prompt or tool call result.
          *
@@ -18904,6 +18956,11 @@ export interface components {
             reasoning?: {
                 [key: string]: unknown;
             } | null;
+            /**
+             * Residency
+             * @description Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.
+             */
+            residency?: string | null;
             /** Response Format */
             response_format?: {
                 [key: string]: unknown;
@@ -21059,6 +21116,10 @@ export interface components {
             reasoning_tokens?: number | null;
             /** Request Group Id */
             request_group_id?: string | null;
+            /** Residency Audit */
+            residency_audit?: {
+                [key: string]: unknown;
+            } | null;
             /** Selection Reason */
             selection_reason?: string | null;
             /** Source */
@@ -27581,6 +27642,8 @@ export interface operations {
             query?: {
                 /** @description Only the models this provider instance serves, described as served there. */
                 provider?: string | null;
+                /** @description Filter models by residency: domestic (level 2+), sovereign (level 3+), or sovereign_model (level 4). */
+                residency?: string | null;
                 /** @description For a signed-in caller, only the models a request billed to this workspace may call. */
                 workspace_id?: string | null;
             };
@@ -30333,6 +30396,39 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["OrgProviderKeyPublic"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    "organizations-set_active_organization_residency_floor": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ResidencyFloorUpdateRequest"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationPublic"];
                 };
             };
             /** @description Validation Error */

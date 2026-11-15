@@ -248,6 +248,8 @@ class UsageEntry(BaseModel):
     attempt_position: int | None = None
     attempt_count: int | None = None
     request_group_id: str | None = None
+    # The requested residency bar and the sovereignty level that served.
+    residency_audit: dict[str, Any] | None = None
     # Who ended a stream before it completed, "provider" or "client"; null for any other row.
     stream_cut_by: StreamCutBy | None = None
 
@@ -294,6 +296,7 @@ class UsageEntry(BaseModel):
             attempt_position=log.attempt_position,
             attempt_count=log.attempt_count,
             request_group_id=log.request_group_id,
+            residency_audit=log.residency_audit,
             stream_cut_by=log.stream_cut_by,
         )
 

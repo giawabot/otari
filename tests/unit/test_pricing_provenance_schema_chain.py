@@ -182,10 +182,8 @@ def test_the_revision_round_trips(sqlite_at_head: tuple[Config, Engine]) -> None
     columns = _columns(engine)
     assert set(_EXPECTED_TYPES) <= set(columns)
     with engine.connect() as connection:
-        # Raw SQL again: revisions after this one add further usage_logs
-        # columns (ttft_ms, provider_latency_ms), so the mapped class now
-        # tracks columns this revision does not have yet and
-        # session.get(UsageLog, ...) would select one that is not there.
+        # Raw SQL again: later revisions add usage_logs columns, including
+        # residency_audit, so the mapped class cannot read this revision.
         row = (
             connection.execute(text(f"SELECT {', '.join(_EXPECTED_TYPES)} FROM usage_logs WHERE id = 'settled-1'"))
             .mappings()

@@ -57,6 +57,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from gateway.api.deps import (
     CurrentIdentity,
     FileServiceDep,
+    OrganizationServiceDep,
     PlaygroundToolOfferDep,
     RequestSessionBillingPortDep,
     RequestSessionModelProviderPortDep,
@@ -180,6 +181,7 @@ async def playground_chat_completions(
     config: Annotated[GatewayConfig, Depends(get_config)],
     log_writer: Annotated[LogWriter, Depends(get_log_writer)],
     model_provider: RequestSessionModelProviderPortDep,
+    organization_service: OrganizationServiceDep,
     tool_ports: ToolPortsDep,
     billing: RequestSessionBillingPortDep,
     workspace_id: Annotated[uuid.UUID | None, _WORKSPACE_QUERY] = None,
@@ -220,6 +222,7 @@ async def playground_chat_completions(
         config=config,
         log_writer=log_writer,
         model_provider=model_provider,
+        organization_service=organization_service,
         # On this route's own ``get_db`` session, which ``BillingPortDep`` is not:
         # a deployment-paid charge has to land in the commit that settles on ``db``.
         billing=billing,

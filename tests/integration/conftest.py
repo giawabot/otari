@@ -20,7 +20,7 @@ from alembic import command
 from alembic.config import Config
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
-from sqlalchemy import Engine, MetaData, create_engine, text
+from sqlalchemy import Engine, create_engine, inspect, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.orm import Session, sessionmaker
@@ -107,22 +107,37 @@ def _reset_engine(database_url: str) -> Engine:
 
 
 def _build_reset_plan(database_url: str) -> _ResetPlan:
-    """Record the schema's tables, in an order safe to reinsert, and whatever the migrations seeded."""
+    """Record the schema's tables and migration-seeded rows in FK order.
+
+    A child row must be reinserted after its FK parents. Reflection order is
+    not dependency order and can change as the migration chain grows.
+    """
     with _reset_engine(database_url).connect() as conn:
-        metadata = MetaData()
-        metadata.reflect(conn)
-        # A seeded row in a child table can reference a seeded row in a parent table, so
-        # reinsertion needs that same order. Table-name order gives no such guarantee.
-        # NOTE: ``organization`` and ``user`` reference each other, so no foreign-key order exists
-        # for that pair and SQLAlchemy warns and orders them by name, which seeds them in the
-        # direction they need.
-        tables = [table.name for table in metadata.sorted_tables if table.name != "alembic_version"]
-        seeds = tuple(
-            (table, rows)
+        insp = inspect(conn)
+        tables = [name for name in insp.get_table_names() if name != "alembic_version"]
+        seeded: dict[str, tuple[dict[str, Any], ...]] = {
+            table: tuple(dict(row) for row in conn.execute(text(f'SELECT * FROM "{table}"')).mappings())
             for table in tables
-            if (rows := tuple(dict(row) for row in conn.execute(text(f'SELECT * FROM "{table}"')).mappings()))
-        )
-    return _ResetPlan(truncate=", ".join(f'"{table}"' for table in tables), seeds=seeds)
+        }
+        seeded = {table: rows for table, rows in seeded.items() if rows}
+        parents = {
+            table: ({fk["referred_table"] for fk in insp.get_foreign_keys(table)} | set()) - {table} for table in seeded
+        }
+        ordered: list[tuple[str, tuple[dict[str, Any], ...]]] = []
+        placed: set[str] = set()
+
+        def place(name: str) -> None:
+            if name in placed:
+                return
+            placed.add(name)
+            for parent in sorted(parents.get(name, ())):
+                if parent in seeded:
+                    place(parent)
+            ordered.append((name, seeded[name]))
+
+        for table in seeded:
+            place(table)
+    return _ResetPlan(truncate=", ".join(f'"{table}"' for table in tables), seeds=tuple(ordered))
 
 
 def _run_alembic_migrations(database_url: str) -> None:

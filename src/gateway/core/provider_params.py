@@ -53,6 +53,7 @@ CHAT_GATEWAY_FIELDS: frozenset[str] = frozenset(
         "mcp_servers",
         "metadata",
         "model",
+        "residency",
         "safety_identifier",
         "session_label",
         "tools_header",

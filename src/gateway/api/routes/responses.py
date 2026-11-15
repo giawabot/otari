@@ -17,6 +17,7 @@ from gateway.api.deps import (
     BillingPortDep,
     ModelProviderPortDep,
     OptionalFileServiceDep,
+    OrganizationServiceDep,
     ToolPortsDep,
     build_sandbox_container_registry,
     build_sandbox_file_bridge,
@@ -42,7 +43,12 @@ from gateway.api.routes._pipeline import (
     scope_prompt_cache_key,
 )
 from gateway.api.routes._request_tags import RequestMetadata, RequestTagsHeader, forwarded_metadata, resolved_tags
-from gateway.api.routes._schema_derive import SESSION_LABEL_DESC, SESSION_LABEL_MAX_LENGTH, derive_request_base
+from gateway.api.routes._schema_derive import (
+    RESIDENCY_DESC,
+    SESSION_LABEL_DESC,
+    SESSION_LABEL_MAX_LENGTH,
+    derive_request_base,
+)
 from gateway.api.routes._tools import _strip_gateway_fields
 from gateway.core.config import GatewayConfig
 from gateway.core.error_codes import ErrorKind
@@ -132,6 +138,8 @@ class ResponsesRequest(derive_request_base(ResponsesParams)):  # type: ignore[mi
     max_tool_iterations: int | None = Field(default=None, ge=1, le=MAX_TOOL_ITERATIONS_CAP)
     session_label: str | None = Field(default=None, max_length=SESSION_LABEL_MAX_LENGTH, description=SESSION_LABEL_DESC)
     metadata: RequestMetadata = None
+    # Gateway-internal residency bar; enforced before dispatch and never forwarded.
+    residency: str | None = Field(default=None, max_length=32, description=RESIDENCY_DESC)
 
 
 def _split_codex_input_metadata(value: Any) -> tuple[Any, bool]:
@@ -432,6 +440,7 @@ async def create_response(
     config: Annotated[GatewayConfig, Depends(get_config)],
     log_writer: Annotated[LogWriter, Depends(get_log_writer)],
     model_provider: ModelProviderPortDep,
+    organization_service: OrganizationServiceDep,
     billing: BillingPortDep,
     tool_ports: ToolPortsDep,
     idempotency: IdempotencyGuardDep,
@@ -500,10 +509,12 @@ async def create_response(
             user_forbidden_detail=_USER_FORBIDDEN,
             streaming=bool(request_body.stream),
             routing_signal=lambda: routing_signal(raw_request),
+            residency=request_body.residency,
             normalize_messages=_normalize,
             tools=request_body.tools,
             code_execution_policies=tool_ports.code_execution_policy,
             model_provider=model_provider,
+            organization_service=organization_service,
             idempotency=None if bool(request_body.stream) else idempotency,
             tags=resolved_tags(tags_header, request_body.metadata),
             turn=read_turn("responses", request_body.input),

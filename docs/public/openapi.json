@@ -4917,6 +4917,19 @@
             "default": "auto",
             "title": "Reasoning Effort"
           },
+          "residency": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
+            "title": "Residency"
+          },
           "response_format": {
             "anyOf": [
               {
@@ -13681,6 +13694,19 @@
             ],
             "title": "Prompt Cache Key"
           },
+          "residency": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
+            "title": "Residency"
+          },
           "service_tier": {
             "anyOf": [
               {
@@ -17745,6 +17771,17 @@
             "title": "Name",
             "type": "string"
           },
+          "residency_floor": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Residency Floor"
+          },
           "slug": {
             "maxLength": 255,
             "title": "Slug",
@@ -21543,6 +21580,25 @@
         "title": "ResetPasswordRequest",
         "type": "object"
       },
+      "ResidencyFloorUpdateRequest": {
+        "description": "Set or clear the organization's residency floor (NorthRouter plan 01b).\n\n``residency_floor`` is a bar name (\"domestic\", \"sovereign\",\n\"sovereign_model\") or null for no floor. An unknown name is refused\nrather than silently treated as no floor: a typo in a compliance\ncontrol must fail loudly.",
+        "properties": {
+          "residency_floor": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Residency Floor"
+          }
+        },
+        "title": "ResidencyFloorUpdateRequest",
+        "type": "object"
+      },
       "ResourceLink": {
         "description": "A resource that the server is capable of reading, included in a prompt or tool call result.\n\nNote: resource links returned by tools are not guaranteed to appear in the results of `resources/list` requests.",
         "properties": {
@@ -21895,6 +21951,19 @@
               }
             ],
             "title": "Reasoning"
+          },
+          "residency": {
+            "anyOf": [
+              {
+                "maxLength": 32,
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Optional residency policy for this request. 'domestic' routes only to providers hosted in the caller's jurisdiction (today: Canada); 'sovereign' requires locally owned and operated hosting outside foreign legal reach. Requests with no bar are unconstrained. A request whose candidate providers cannot clear the bar is refused with 403 rather than served from a non-compliant provider. The honored level is recorded on the usage row for audit.",
+            "title": "Residency"
           },
           "response_format": {
             "anyOf": [
@@ -27088,6 +27157,18 @@
               }
             ],
             "title": "Request Group Id"
+          },
+          "residency_audit": {
+            "anyOf": [
+              {
+                "additionalProperties": true,
+                "type": "object"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Residency Audit"
           },
           "selection_reason": {
             "anyOf": [
@@ -40456,6 +40537,24 @@
             }
           },
           {
+            "description": "Filter models by residency: domestic (level 2+), sovereign (level 3+), or sovereign_model (level 4).",
+            "in": "query",
+            "name": "residency",
+            "required": false,
+            "schema": {
+              "anyOf": [
+                {
+                  "type": "string"
+                },
+                {
+                  "type": "null"
+                }
+              ],
+              "description": "Filter models by residency: domestic (level 2+), sovereign (level 3+), or sovereign_model (level 4).",
+              "title": "Residency"
+            }
+          },
+          {
             "description": "For a signed-in caller, only the models a request billed to this workspace may call.",
             "in": "query",
             "name": "workspace_id",
@@ -45312,6 +45411,56 @@
         "summary": "Restore Org Provider Key",
         "tags": [
           "provider-keys"
+        ]
+      }
+    },
+    "/api/v1/organizations/me/residency-floor": {
+      "put": {
+        "description": "Set or clear the caller's organization's residency floor.\n\nOrganization owners and admins only. The floor binds every request made\nwith the organization's keys: the effective bar is\n``max(request_bar, org_floor)``, so a member can raise the requirement\nfrom a request but never lower the floor, and a key with no\n``allowed_models`` restriction is not exempt. Pass ``residency_floor:\nnull`` to clear it.",
+        "operationId": "organizations-set_active_organization_residency_floor",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ResidencyFloorUpdateRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationPublic"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "422": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/HTTPValidationError"
+                }
+              }
+            },
+            "description": "Validation Error"
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "XApiKeyAuth": []
+          }
+        ],
+        "summary": "Set Active Organization Residency Floor",
+        "tags": [
+          "organizations"
         ]
       }
     },

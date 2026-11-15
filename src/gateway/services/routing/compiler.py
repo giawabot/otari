@@ -39,6 +39,7 @@ from gateway.models.routing import MAX_CANDIDATES, PolicySpec, WhenClause
 from gateway.services.model_access import is_model_allowed, organization_key_refusal
 from gateway.services.provider_kwargs import resolve_catalog_fallback, resolve_provider_selector
 from gateway.services.providers import CountryGate
+from gateway.services.sovereignty import SovereigntyMap, SovereigntyService
 from gateway.types.attempt import Attempt
 from gateway.types.budget_state import BudgetState
 
@@ -290,6 +291,8 @@ def compile_policy(
     router_ordering: RouterOrdering | None = None,
     workspace_id: uuid.UUID | None = None,
     country_gate: CountryGate | None = None,
+    required_sovereignty: int = 1,
+    sovereignty: SovereigntyMap | None = None,
 ) -> CompiledPlan:
     """Turn ``spec`` into an ordered plan for one request.
 
@@ -335,6 +338,8 @@ def compile_policy(
         allowlist=allowlist,
         workspace_id=workspace_id,
         country_gate=country_gate,
+        required_sovereignty=required_sovereignty,
+        sovereignty=sovereignty,
     )
 
     if not attempts:
@@ -377,6 +382,8 @@ def compile_catalog_plan(
     workspace_id: uuid.UUID | None = None,
     candidate_limit: int = MAX_CANDIDATES,
     country_gate: CountryGate | None = None,
+    required_sovereignty: int = 1,
+    sovereignty: SovereigntyMap | None = None,
 ) -> CompiledPlan | None:
     """Turn a catalog ID into a failover plan over its offerings, best first, or ``None``.
 
@@ -399,6 +406,8 @@ def compile_catalog_plan(
         workspace_id=workspace_id,
         candidate_limit=candidate_limit,
         country_gate=country_gate,
+        required_sovereignty=required_sovereignty,
+        sovereignty=sovereignty,
     )
     if dropped and logger.isEnabledFor(logging.DEBUG):
         logger.debug(
@@ -424,6 +433,8 @@ def _resolve_candidates(
     workspace_id: uuid.UUID | None,
     country_gate: CountryGate | None,
     candidate_limit: int = MAX_CANDIDATES,
+    required_sovereignty: int = 1,
+    sovereignty: SovereigntyMap | None = None,
 ) -> tuple[list[Attempt], list[DroppedCandidate]]:
     """The attempts ``ordered`` resolves to for this caller, and every candidate dropped on the way."""
     attempts: list[Attempt] = []
@@ -466,6 +477,13 @@ def _resolve_candidates(
         if refusal is not None:
             dropped.append(DroppedCandidate(selector, "not_allowed", _ORG_REFUSAL_FRAGMENTS[refusal.code]))
             continue
+        if required_sovereignty > 1 and sovereignty is not None:
+            allowed, why = SovereigntyService.is_enough(
+                sovereignty, resolved.instance, resolved.model, required_sovereignty
+            )
+            if not allowed:
+                dropped.append(DroppedCandidate(selector, "residency", why))
+                continue
         if country_gate is not None and country_gate.refuses(config, resolved.instance):
             dropped.append(DroppedCandidate(selector, "country_not_supported", _country_fragment(country_gate)))
             continue
