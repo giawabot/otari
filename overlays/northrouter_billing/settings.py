@@ -72,7 +72,9 @@ def load_settings(environ: Mapping[str, str] | None = None) -> BillingSettings:
         raise ValueError("NORTHROUTER_BILLING_SERVICE_TOKEN must be set")
     previous = _token(env, "NORTHROUTER_BILLING_SERVICE_TOKEN_PREVIOUS")
     if previous is not None and previous == current:
-        raise ValueError("NORTHROUTER_BILLING_SERVICE_TOKEN_PREVIOUS must differ from NORTHROUTER_BILLING_SERVICE_TOKEN")
+        raise ValueError(
+            "NORTHROUTER_BILLING_SERVICE_TOKEN_PREVIOUS must differ from NORTHROUTER_BILLING_SERVICE_TOKEN"
+        )
     tokens = ((SERVICE, current),) + (((SERVICE_PREVIOUS, previous),) if previous is not None else ())
 
     raw_limit = env.get("NORTHROUTER_ORG_CONCURRENCY_LIMIT", "").strip()
