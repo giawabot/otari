@@ -505,7 +505,12 @@ through `BillingPort` (a build may also rebind `ModelProviderPort` through
 - When the request settles, its cost, including the cost an abandoned or failed
   request still owes, is charged to the organization.
 - No funds are held while the request runs, so concurrent requests can take an
-  organization below zero.
+  organization below zero. A billing adapter can bound that by answering a
+  concurrency limit: each deployment-paid model call, on Chat Completions,
+  Messages, Responses and the pass-through endpoints alike, then takes one of the
+  organization's slots until its response ends, and one that finds none free
+  within a few seconds is refused with `429` (`rate_limited`, rule
+  `organization_concurrency`).
 
 In the open-source build the billing adapter does nothing: a hosted-provider
 request is served and recorded as deployment-paid on its usage row, and no

@@ -771,6 +771,35 @@ def _embed(client: TestClient, key: dict[str, Any]) -> tuple[Any, AsyncMock]:
     return response, call
 
 
+def test_a_pass_through_call_over_its_organizations_concurrency_limit_waits_then_is_refused(
+    billed: tuple[TestClient, ModuleType], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, probe = billed
+    _price(client, "openai:text-embedding-3-small")
+    key = _key(client)
+    probe.LIMIT["concurrency"] = 1
+    monkeypatch.setattr(pipeline, "_ORGANIZATION_SLOT_WAIT_SEC", 0.05)
+
+    served, _ = _embed(client, key)
+    assert served.status_code == status.HTTP_200_OK, served.text
+    (organization,) = {org for _, org in probe.GATES}
+    store: RateLimitStorePort = cast(FastAPI, client.app).state.rate_limit_store
+    slot = f"organization:{organization}:concurrent"
+    # The served call gave its slot back when its response ended.
+    other = asyncio.run(store.acquire(slot, 1, 60.0))
+    assert other is not None
+
+    refused, call = _embed(client, key)
+
+    assert refused.status_code == status.HTTP_429_TOO_MANY_REQUESTS, refused.text
+    assert refused.headers[ERROR_CODE_HEADER] == RATE_LIMITED
+    assert refused.headers[RATE_LIMIT_RULE_HEADER] == "organization_concurrency"
+    call.assert_not_called()
+    assert len(probe.LEDGER) == 1
+    assert _user(client)["reserved"] == pytest.approx(0.0)
+    asyncio.run(store.release(slot, other))
+
+
 @pytest.fixture
 def billed_without_jobs(
     postgres_url: str, clean_database: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

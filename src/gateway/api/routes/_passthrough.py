@@ -65,6 +65,7 @@ from gateway.api.routes._pipeline import (
     HOSTED_CREDENTIAL_UNUSABLE_DETAIL,
     _elapsed_ms,
     _raise_for_unresolvable_model,
+    hold_organization_slot,
     log_gateway_rejection,
     request_started,
     throttle_early_rejection,
@@ -92,7 +93,7 @@ from gateway.models.pricing import ModelPricing
 from gateway.models.usage import UsageLog
 from gateway.ports.billing_port import FUNDS_CHECK_UNAVAILABLE_DETAIL, NO_TOOLS, BillingPort, InsufficientFundsError
 from gateway.ports.model_provider_port import HostedAccessDeniedError, ModelProviderPort
-from gateway.rate_limit import check_rate_limit, rate_limit_headers
+from gateway.rate_limit import check_rate_limit, open_rate_limit_grant, rate_limit_headers
 from gateway.schemas.inference import DecisionRequest, DecisionResponse
 from gateway.services.api_keys import (
     API_KEY_NO_USER_DETAIL,
@@ -995,6 +996,17 @@ async def run_passthrough(
     # image generation or a long transcription outlasts a completion, so this
     # path reaches the pool ceiling sooner rather than later.
     await release_session(db)
+
+    # As on the completion pipeline: a deployment-paid call takes one of its
+    # organization's slots, waiting on no database connection, until the response ends.
+    if deployment_charge is not None and deployment_charge.concurrency_limit is not None:
+        try:
+            await hold_organization_slot(open_rate_limit_grant(raw_request), deployment_charge)
+        except asyncio.CancelledError:
+            await refund_reservation(db, reservation)
+            raise
+        except HTTPException as exc:
+            raise await _refuse(reservation, resolved, exc.status_code, str(exc.detail), **(exc.headers or {})) from exc
 
     track_request(
         raw_request,
