@@ -18,7 +18,6 @@ from sqlalchemy.sql.elements import ColumnElement
 from gateway.exceptions.organizations_exceptions import OrganizationNotFoundError
 from gateway.ports.billing_port import BilledModel, BillingPort, InsufficientFundsError, ToolUse
 from gateway.services.tenancy import OrganizationService
-from northrouter_billing.fx import get_fx_margin
 from northrouter_billing.models import NrHold, NrLedgerEntry, NrOrg, _money
 
 _PAID_IN_TYPES = ("grant", "refund", "invoice", "dispute")
@@ -67,7 +66,9 @@ def get_min_available_usd() -> Decimal:
 
 def validate_billing_env() -> None:
     """Validate overlay configuration variables during startup registration."""
-    get_fx_margin()
+    service_token = os.getenv("NORTHROUTER_BILLING_SERVICE_TOKEN", "").strip()
+    if not service_token:
+        raise ValueError("NORTHROUTER_BILLING_SERVICE_TOKEN must be set and non-blank")
     get_org_concurrency_limit()
     get_min_available_usd()
 
@@ -223,7 +224,7 @@ class NorthRouterBillingAdapter(BillingPort):
         return org, available
 
     async def apply_due_credit(self, *, organization_id: uuid.UUID) -> None:
-        """No-op: subscription credits are granted strictly on paid Stripe invoices."""
+        """No-op: subscription credits are granted strictly after paid invoices."""
         del organization_id
 
     async def require_funds_on_deposit(

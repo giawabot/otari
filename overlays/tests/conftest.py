@@ -32,12 +32,7 @@ def _async_database_url(raw_url: str) -> str:
 def default_billing_env(monkeypatch: pytest.MonkeyPatch) -> None:
     """Provide default overlay environment variables for tests unless overridden."""
     monkeypatch.setenv("NORTHROUTER_BILLING_OAUTH_CLIENT_ID", "northrouter-web")
-    monkeypatch.setenv("NORTHROUTER_STRIPE_PRICE_STARTER", "price_starter")
-    monkeypatch.setenv("NORTHROUTER_STRIPE_PRICE_GROWTH", "price_growth")
-    monkeypatch.setenv("NORTHROUTER_STRIPE_PRICE_SCALE", "price_scale")
-    monkeypatch.setenv("NORTHROUTER_STRIPE_SECRET_KEY", "sk_test_northrouter")
-    monkeypatch.setenv("NORTHROUTER_STRIPE_WEBHOOK_SECRET", "whsec_test_northrouter")
-    monkeypatch.delenv("NORTHROUTER_ETRANSFER_FX_MARGIN", raising=False)
+    monkeypatch.setenv("NORTHROUTER_BILLING_SERVICE_TOKEN", "billing-service-test-token")
     monkeypatch.delenv("NORTHROUTER_ORG_CONCURRENCY_LIMIT", raising=False)
     monkeypatch.delenv("NORTHROUTER_MIN_AVAILABLE_USD", raising=False)
 

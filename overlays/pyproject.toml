@@ -13,7 +13,6 @@ dependencies = [
     "httpx>=0.28",
     "pydantic>=2",
     "sqlalchemy[asyncio]>=2",
-    "stripe>=17,<18",
 ]
 
 [project.optional-dependencies]

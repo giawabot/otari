@@ -6,8 +6,6 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from sqlalchemy import (
-    BigInteger,
-    Boolean,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -54,7 +52,6 @@ class NrOrg(BillingBase):
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     otari_org_id: Mapped[uuid.UUID] = mapped_column(Uuid, nullable=False, unique=True, index=True)
-    stripe_customer_id: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     suspend_reason: Mapped[str | None] = mapped_column(String(64))
     balance: Mapped[Decimal] = mapped_column(UsdAmount(), nullable=False, default=lambda: Decimal("0.000000"))
@@ -63,10 +60,7 @@ class NrOrg(BillingBase):
         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
     )
 
-    __table_args__ = (
-        CheckConstraint("status IN ('active', 'suspended')", name="ck_nr_orgs_status"),
-        Index("uq_nr_orgs_stripe_customer_id", "stripe_customer_id", unique=True),
-    )
+    __table_args__ = (CheckConstraint("status IN ('active', 'suspended')", name="ck_nr_orgs_status"),)
 
 
 class NrLedgerEntry(BillingBase):
@@ -116,62 +110,17 @@ class NrHold(BillingBase):
     )
 
 
-class NrETransfer(BillingBase):
-    """Customer-submitted CAD e-transfer awaiting operator review."""
+class NrGrantEvent(BillingBase):
+    """Idempotency record and original result for a machine-issued grant."""
 
-    __tablename__ = "nr_e_transfers"
+    __tablename__ = "nr_grant_events"
 
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("nr_orgs.id", ondelete="CASCADE"), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), primary_key=True)
+    payload_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_ref: Mapped[str | None] = mapped_column(String(255))
+    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("nr_orgs.id", ondelete="CASCADE"), nullable=False)
     amount: Mapped[Decimal] = mapped_column(UsdAmount(), nullable=False)
-    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="CAD")
-    reference: Mapped[str] = mapped_column(String(255), nullable=False)
-    reference_normalized: Mapped[str] = mapped_column(String(255), nullable=False)
-    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
-    fx_rate: Mapped[Decimal | None] = mapped_column(UsdAmount())
-    fx_rate_date: Mapped[str | None] = mapped_column(String(32))
-    fx_source: Mapped[str | None] = mapped_column(String(64))
-    fx_margin: Mapped[Decimal | None] = mapped_column(UsdAmount())
-    credited_usd: Mapped[Decimal | None] = mapped_column(UsdAmount())
-    reviewed_by: Mapped[str | None] = mapped_column(String(255))
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+    ledger_entry_id: Mapped[uuid.UUID | None] = mapped_column(Uuid)
+    balance_after: Mapped[Decimal | None] = mapped_column(UsdAmount())
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-    def __init__(self, **kwargs: Any) -> None:
-        if "reference" in kwargs and "reference_normalized" not in kwargs:
-            kwargs["reference_normalized"] = str(kwargs["reference"]).strip().lower()
-        if "currency" not in kwargs:
-            kwargs["currency"] = "CAD"
-        super().__init__(**kwargs)
-
-    __table_args__ = (
-        CheckConstraint("status IN ('pending', 'approved', 'rejected')", name="ck_nr_e_transfers_status"),
-        Index("uq_nr_e_transfers_reference_normalized", "reference_normalized", unique=True),
-    )
-
-
-class NrSubscription(BillingBase):
-    """Stripe subscription and the credit value of its active billing period."""
-
-    __tablename__ = "nr_subscriptions"
-
-    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
-    org_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("nr_orgs.id", ondelete="CASCADE"), index=True)
-    stripe_subscription_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
-    price_id: Mapped[str | None] = mapped_column(String(255))
-    plan: Mapped[str] = mapped_column(String(255), nullable=False)
-    status: Mapped[str] = mapped_column(String(32), nullable=False)
-    current_period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    credit_amount: Mapped[Decimal] = mapped_column(UsdAmount(), nullable=False)
-    last_event_created: Mapped[int | None] = mapped_column(BigInteger)
-
-
-class NrWebhookEvent(BillingBase):
-    """Stripe event IDs make webhook delivery replay-safe."""
-
-    __tablename__ = "nr_webhook_events"
-
-    event_id: Mapped[str] = mapped_column(String(255), primary_key=True)
-    event_type: Mapped[str] = mapped_column(String(255), nullable=False)
-    processed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
-    succeeded: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
