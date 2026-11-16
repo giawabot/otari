@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from gateway.api.deps import (
     get_config,
+    get_current_identity,
     get_db,
     verify_api_key_or_master_key,
     verify_master_key,
@@ -27,6 +28,7 @@ from gateway.api.deps import (
 from gateway.core.config import GatewayConfig
 from gateway.exceptions.organizations_exceptions import NotAuthorizedError, OrganizationNotFoundError
 from gateway.models.api_keys import APIKey
+from gateway.models.tenancy import MANAGEMENT_ROLES
 from gateway.models.tenancy import User as TenancyUser
 from gateway.services.tenancy import OrganizationService
 from northrouter_billing.adapter import (
@@ -453,6 +455,32 @@ async def sweep_holds(
         await post_ledger(db, org_id=hold.org_id, entry_type="release", amount=hold.amount, ref=f"release:{hold.id}")
     await db.commit()
     return {"released": len(holds), "more": len(holds) == SWEEP_BATCH}
+
+
+@billing_router.get("/me/account")
+async def get_my_account(
+    identity: Annotated[TenancyUser, Depends(get_current_identity)],
+    db: Annotated[AsyncSession, Depends(get_db)],
+) -> dict[str, Any]:
+    """The caller's active organization's billing status and funds, for the dashboard top bar."""
+    organizations = OrganizationService(db, membership_listener=None)
+    active_org = await organizations.get_active_organization_for_user(identity)
+    membership = await organizations.members.get_active_by_organization_and_user(active_org.id, identity.id)
+    if membership is None or membership.role not in MANAGEMENT_ROLES:
+        raise NotAuthorizedError
+    org = await db.scalar(select(NrOrg).where(NrOrg.otari_org_id == active_org.id))
+    if org is None:
+        raise OrganizationNotFoundError(active_org.id)
+    balance = _money(org.balance)
+    held = await held_amount(db, org.id, datetime.now(UTC))
+    return {
+        "organization_id": str(active_org.id),
+        "status": org.status,
+        "balance": str(balance),
+        "held": str(held),
+        "available": str(_money(balance - held)),
+        "currency": "USD",
+    }
 
 
 @billing_router.get("/orgs/{organization_id}/account")

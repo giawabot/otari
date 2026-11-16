@@ -40,9 +40,10 @@ from gateway.core.config import GatewayConfig
 from gateway.exceptions import TenancyError
 from gateway.exceptions.organizations_exceptions import NotAuthorizedError, OrganizationNotFoundError
 from gateway.models.api_keys import APIKey
-from gateway.models.tenancy import Organization, WorkspaceMember
+from gateway.models.tenancy import DashboardSession, Organization, WorkspaceMember
 from gateway.ports.billing_port import NO_TOOLS, BilledModel, BillingPort, InsufficientFundsError
 from gateway.repositories.api_keys.api_key_repository import ApiKeyRepository
+from gateway.services.dashboard_session_service import SESSION_COOKIE_NAME, hash_session_token
 from gateway.services.tenancy import OrganizationService
 from northrouter_billing.adapter import NorthRouterBillingAdapter, post_ledger
 from northrouter_billing.migration_filter import include_object
@@ -64,6 +65,7 @@ from northrouter_billing.routes import (
     get_account,
     get_billing_context,
     get_ledger,
+    get_my_account,
     grant_funds,
     require_billing_manager,
     set_organization_status,
@@ -853,6 +855,62 @@ async def test_the_account_reports_what_the_gates_judge(db: AsyncSession) -> Non
     fresh = await get_account(BillingReader(organization_id=unknown, internal=False), db, _settings())
     assert (fresh["status"], fresh["balance"]) == ("active", "0.000000")
     assert await db.scalar(select(NrOrg).where(NrOrg.otari_org_id == unknown)) is None
+
+
+@pytest.mark.asyncio
+async def test_me_account_reports_balance_and_held_for_owner_and_admin(db: AsyncSession) -> None:
+    org_id, owner, _workspace, _owner_key = await seed_tenancy_org(db, role="owner")
+    _, admin, _workspace2, _admin_key = await seed_tenancy_org(db, org_id=org_id, role="admin")
+    await _grant(db, org_id, "100.00", "me-account-grant")
+    await NorthRouterBillingAdapter(db).hold(organization_id=org_id, amount=Decimal("12.50"))
+    await db.commit()
+
+    expected = {
+        "organization_id": str(org_id),
+        "status": "active",
+        "balance": "100.000000",
+        "held": "12.500000",
+        "available": "87.500000",
+        "currency": "USD",
+    }
+    assert await get_my_account(owner, db) == expected
+    assert await get_my_account(admin, db) == expected
+
+    session_token = "dashboard-session-token-123"
+    db.add(
+        DashboardSession(
+            user_id=owner.id,
+            token_hash=hash_session_token(session_token),
+            expires_at=datetime.now(UTC) + timedelta(hours=1),
+        )
+    )
+    await db.commit()
+
+    async with _client(db) as client:
+        assert (await client.get("/api/v1/nr/billing/me/account")).status_code == 401
+        client.cookies.set(SESSION_COOKIE_NAME, session_token)
+        response = await client.get("/api/v1/nr/billing/me/account")
+        assert response.status_code == 200
+        assert response.json() == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("role", ["member", "viewer"])
+async def test_me_account_refuses_non_managers(db: AsyncSession, role: str) -> None:
+    org_id, user, _workspace, _api_key = await seed_tenancy_org(db, role=role)
+    await _grant(db, org_id, "50.00", f"me-account-{role}")
+    with pytest.raises(NotAuthorizedError) as raised:
+        await get_my_account(user, db)
+    assert raised.value.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_me_account_returns_404_when_billing_is_not_provisioned(db: AsyncSession) -> None:
+    _org_id, owner, _workspace, _api_key = await seed_tenancy_org(db, role="owner")
+    with pytest.raises(OrganizationNotFoundError) as raised:
+        await get_my_account(owner, db)
+    assert raised.value.status_code == 404
+    assert await db.scalar(select(func.count()).select_from(NrOrg)) == 0
 
 
 @pytest.mark.asyncio
