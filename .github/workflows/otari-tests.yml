@@ -8,6 +8,7 @@ on:
       - 'cli/**'
       - 'any-search/**'
       - 'any-fetch/**'
+      - 'overlays/**'
       - 'alembic/**'
       - 'tests/integration/**'
       - 'tests/unit/**'
@@ -34,6 +35,7 @@ on:
       - 'cli/**'
       - 'any-search/**'
       - 'any-fetch/**'
+      - 'overlays/**'
       - 'alembic/**'
       - 'tests/integration/**'
       - 'tests/unit/**'
@@ -179,3 +181,44 @@ jobs:
 
     - name: Verify OpenAPI spec is up to date
       run: make openapi-check
+
+  test-overlays:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: postgres:17
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      with:
+        persist-credentials: false
+
+    - uses: astral-sh/setup-uv@68559e99cc807c1eb7e9238fd43a15bba460eec2 # v10.3.3
+      with:
+        python-version: 3.14
+        activate-environment: true
+
+    - name: Install dependencies
+      run: |
+        uv sync --dev --frozen
+        uv pip install -e overlays/
+
+    - name: Run overlay tests (SQLite)
+      run: uv run pytest overlays/tests -v
+
+    - name: Run overlay tests (PostgreSQL)
+      env:
+        TEST_DATABASE_URL: postgresql+asyncpg://postgres:postgres@localhost:5432/postgres
+      run: uv run pytest overlays/tests -v

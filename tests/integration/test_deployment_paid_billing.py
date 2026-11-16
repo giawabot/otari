@@ -49,7 +49,13 @@ from sqlalchemy.orm import Session
 from gateway.api.deps import get_web_provider_client
 from gateway.api.routes import _pipeline as pipeline
 from gateway.core.config import API_KEY_HEADER, API_ROOT, COST_USD_HEADER, PRICING_SOURCE_HEADER, GatewayConfig
-from gateway.core.error_codes import ERROR_CODE_HEADER, INSUFFICIENT_FUNDS, RATE_LIMIT_RULE_HEADER, RATE_LIMITED
+from gateway.core.error_codes import (
+    DEPLOYMENT_PAID_JOB_REFUSED,
+    ERROR_CODE_HEADER,
+    INSUFFICIENT_FUNDS,
+    RATE_LIMIT_RULE_HEADER,
+    RATE_LIMITED,
+)
 from gateway.log_config import logger as gateway_logger
 from gateway.models.routing import RoutingConfig
 from gateway.models.usage import UsageLog
@@ -746,6 +752,113 @@ def test_a_batch_on_a_deployment_paid_credential_is_refused_without_funds(
     assert response.status_code == status.HTTP_402_PAYMENT_REQUIRED, response.text
     assert response.headers[ERROR_CODE_HEADER] == INSUFFICIENT_FUNDS
     create.assert_not_called()
+
+
+def _embedding() -> CreateEmbeddingResponse:
+    return CreateEmbeddingResponse(
+        data=[Embedding(embedding=[0.1], index=0, object="embedding")],
+        model="text-embedding-3-small",
+        object="list",
+        usage=Usage(prompt_tokens=15, total_tokens=15),
+    )
+
+
+def _embed(client: TestClient, key: dict[str, Any]) -> tuple[Any, AsyncMock]:
+    with patch("gateway.api.routes.embeddings.aembedding", new=AsyncMock(return_value=_embedding())) as call:
+        response = client.post(
+            f"{API_ROOT}/embeddings", json={"model": "openai:text-embedding-3-small", "input": "hi"}, headers=_auth(key)
+        )
+    return response, call
+
+
+def test_a_pass_through_call_over_its_organizations_concurrency_limit_waits_then_is_refused(
+    billed: tuple[TestClient, ModuleType], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, probe = billed
+    _price(client, "openai:text-embedding-3-small")
+    key = _key(client)
+    probe.LIMIT["concurrency"] = 1
+    monkeypatch.setattr(pipeline, "_ORGANIZATION_SLOT_WAIT_SEC", 0.05)
+
+    served, _ = _embed(client, key)
+    assert served.status_code == status.HTTP_200_OK, served.text
+    (organization,) = {org for _, org in probe.GATES}
+    store: RateLimitStorePort = cast(FastAPI, client.app).state.rate_limit_store
+    slot = f"organization:{organization}:concurrent"
+    # The served call gave its slot back when its response ended.
+    other = asyncio.run(store.acquire(slot, 1, 60.0))
+    assert other is not None
+
+    refused, call = _embed(client, key)
+
+    assert refused.status_code == status.HTTP_429_TOO_MANY_REQUESTS, refused.text
+    assert refused.headers[ERROR_CODE_HEADER] == RATE_LIMITED
+    assert refused.headers[RATE_LIMIT_RULE_HEADER] == "organization_concurrency"
+    call.assert_not_called()
+    assert len(probe.LEDGER) == 1
+    assert _user(client)["reserved"] == pytest.approx(0.0)
+    asyncio.run(store.release(slot, other))
+
+
+@pytest.fixture
+def billed_without_jobs(
+    postgres_url: str, clean_database: None, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> Generator[tuple[TestClient, ModuleType]]:
+    """``billed``, on a deployment that runs no batch or video job on its own credentials."""
+    yield from _billed(postgres_url, tmp_path, monkeypatch, deployment_paid_jobs=False)
+
+
+def test_a_batch_on_a_deployment_paid_credential_is_refused_when_jobs_are_off(
+    billed_without_jobs: tuple[TestClient, ModuleType],
+) -> None:
+    client, probe = billed_without_jobs
+    key = _key(client)
+    body = {
+        "model": "openai:gpt-4o",
+        "requests": [{"custom_id": "r1", "body": {"messages": [{"role": "user", "content": "Hi"}]}}],
+    }
+
+    with (
+        patch("gateway.api.routes.batches.AnyLLM.get_provider_class", return_value=_SupportsBatch),
+        patch("gateway.api.routes.batches.acreate_batch", new=AsyncMock(spec=Batch)) as create,
+    ):
+        response = client.post(f"{API_ROOT}/batches", json=body, headers=_auth(key))
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN, response.text
+    assert response.headers[ERROR_CODE_HEADER] == DEPLOYMENT_PAID_JOB_REFUSED
+    create.assert_not_called()
+    assert probe.GATES == []
+
+
+def test_a_video_on_a_deployment_paid_credential_is_refused_when_jobs_are_off(
+    billed_without_jobs: tuple[TestClient, ModuleType],
+) -> None:
+    client, probe = billed_without_jobs
+    key = _key(client)
+
+    with patch("gateway.api.routes.videos.avideo_generation", new=AsyncMock()) as generate:
+        response = client.post(
+            f"{API_ROOT}/videos", json={"model": "openai:sora-2", "prompt": "a lighthouse"}, headers=_auth(key)
+        )
+
+    assert response.status_code == status.HTTP_403_FORBIDDEN, response.text
+    assert response.headers[ERROR_CODE_HEADER] == DEPLOYMENT_PAID_JOB_REFUSED
+    generate.assert_not_called()
+    assert probe.GATES == []
+    assert _user(client)["reserved"] == pytest.approx(0.0)
+
+
+def test_embeddings_are_served_when_jobs_are_off(billed_without_jobs: tuple[TestClient, ModuleType]) -> None:
+    """``deployment_paid_jobs`` concerns jobs settled later, never a call settled in its own response."""
+    client, probe = billed_without_jobs
+    _price(client, "openai:text-embedding-3-small")
+    key = _key(client)
+
+    response, call = _embed(client, key)
+
+    assert response.status_code == status.HTTP_200_OK, response.text
+    call.assert_awaited_once()
+    assert len(probe.LEDGER) == 1
 
 
 # A gateway-run tool is charged by whose account ran it, whoever paid for the model call.

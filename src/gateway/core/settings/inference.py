@@ -143,6 +143,16 @@ class InferenceSettings(BaseModel):
         ),
     )
 
+    deployment_paid_jobs: Annotated[bool, Shown(SettingsGroup.METERING)] = Field(
+        default=True,
+        description=(
+            "Whether a batch or a video job may run on a credential the deployment pays for. Such a job is "
+            "admitted when created and charged only when its results are accounted, so nothing bounds what "
+            "one job costs an organization. false refuses one with 403 (deployment_paid_job_refused); a job "
+            "on the organization's own provider key is unaffected."
+        ),
+    )
+
     streaming_first_chunk_hold_ms: Annotated[int, Shown(SettingsGroup.GENERAL)] = Field(
         default=15000,
         ge=0,

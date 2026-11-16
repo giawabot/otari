@@ -83,6 +83,9 @@ class APIKey(Base):
     # key predates the column and its origin is unrecorded. Demoting a member
     # to viewer switches off only the true ones.
     self_service: Mapped[bool | None] = mapped_column(default=None)
+    # The registered OAuth app a key was issued to, set only by the app grant
+    # exchange. Unlike ``metadata``, no key route writes it, so an app may trust it.
+    oauth_client_id: Mapped[str | None] = mapped_column(String(128), default=None)
     # The reason the owner cannot enable this key. NULL for every other key,
     # including one the owner disabled.
     disabled_reason: Mapped[DisabledReason | None] = mapped_column(

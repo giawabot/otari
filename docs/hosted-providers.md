@@ -505,7 +505,12 @@ through `BillingPort` (a build may also rebind `ModelProviderPort` through
 - When the request settles, its cost, including the cost an abandoned or failed
   request still owes, is charged to the organization.
 - No funds are held while the request runs, so concurrent requests can take an
-  organization below zero.
+  organization below zero. A billing adapter can bound that by answering a
+  concurrency limit: each deployment-paid model call, on Chat Completions,
+  Messages, Responses and the pass-through endpoints alike, then takes one of the
+  organization's slots until its response ends, and one that finds none free
+  within a few seconds is refused with `429` (`rate_limited`, rule
+  `organization_concurrency`).
 
 In the open-source build the billing adapter does nothing: a hosted-provider
 request is served and recorded as deployment-paid on its usage row, and no
@@ -524,9 +529,13 @@ in `input` instead, or use a model on the organization's own key.
 
 This covers every provider path: Chat Completions, Messages, Responses, the
 Playground, the pass-through endpoints (embeddings, images, audio, rerank,
-moderations) and batches. Each routing or fallback candidate is checked as it
-is reached, so one the organization cannot fund is skipped. A batch is admitted
-when created and charged when its results are accounted.
+moderations), batches and videos. Each routing or fallback candidate is checked
+as it is reached, so one the organization cannot fund is skipped. A batch or a
+video job is admitted when created and charged when its results are accounted,
+so nothing bounds what one job costs; set `deployment_paid_jobs: false` to
+refuse such a job on a deployment-paid credential with `403`
+(`deployment_paid_job_refused`). A job on the organization's own provider key
+is unaffected.
 
 ## Upgrading
 

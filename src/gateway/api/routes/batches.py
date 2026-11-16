@@ -27,6 +27,7 @@ from gateway.api.deps import (
 from gateway.api.routes._helpers import (
     country_gate_for,
     country_not_supported,
+    deployment_paid_job_refused,
     missing_credential_error,
 )
 from gateway.api.routes._passthrough import (
@@ -432,6 +433,8 @@ async def create_batch(
     except Exception as exc:
         raise hosted_credential_unusable(resolved.instance, exc) from exc
     if served is not None:
+        if not config.deployment_paid_jobs:
+            raise deployment_paid_job_refused()
         resolved, provider = served, served.provider
         try:
             # Gated at creation; the results are charged when they are accounted.

@@ -1274,9 +1274,19 @@ async def _hold_organization_slot(ctx: RequestContext, charge: DeploymentCharge 
         HTTPException: 429 when no slot frees in time.
 
     """
-    if charge is None or charge.concurrency_limit is None or ctx.rate_limit_grant is None:
+    await hold_organization_slot(ctx.rate_limit_grant, charge)
+
+
+async def hold_organization_slot(grant: RateLimitGrant | None, charge: DeploymentCharge | None) -> None:
+    """Hold one of ``charge``'s organization slots on ``grant``, for any scaffold that admitted a deployment-paid call.
+
+    Raises:
+        HTTPException: 429 when no slot frees in time.
+
+    """
+    if charge is None or charge.concurrency_limit is None or grant is None:
         return
-    await ctx.rate_limit_grant.hold_slot(
+    await grant.hold_slot(
         organization_slot_key(charge.organization_id),
         charge.concurrency_limit,
         wait_sec=_ORGANIZATION_SLOT_WAIT_SEC,
