@@ -7,6 +7,7 @@ from alembic import context
 from sqlalchemy import engine_from_config, pool
 from sqlalchemy.engine import make_url
 
+from northrouter_billing.migration_filter import VERSION_TABLE, include_object
 from northrouter_billing.models import BillingBase
 
 config = context.config
@@ -38,7 +39,8 @@ def run_migrations_offline() -> None:
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
-        version_table="nr_alembic_version",
+        version_table=VERSION_TABLE,
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -56,7 +58,8 @@ def run_migrations_online() -> None:
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
-            version_table="nr_alembic_version",
+            version_table=VERSION_TABLE,
+            include_object=include_object,
         )
         with context.begin_transaction():
             context.run_migrations()
