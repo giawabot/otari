@@ -1,10 +1,13 @@
 """Session-scoped implementation of Otari's deployment-paid billing port."""
 
 import json
+import logging
+import os
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from typing import Any
 
 from sqlalchemy import and_, case, func, or_, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
@@ -12,14 +15,18 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.sql.elements import ColumnElement
 
+from gateway.exceptions.organizations_exceptions import OrganizationNotFoundError
 from gateway.ports.billing_port import BilledModel, BillingPort, InsufficientFundsError, ToolUse
-from northrouter_billing.models import NrHold, NrLedgerEntry, NrOrg, NrSubscription, _money
+from gateway.services.tenancy import OrganizationService
+from northrouter_billing.fx import get_fx_margin
+from northrouter_billing.models import NrHold, NrLedgerEntry, NrOrg, _money
 
-_PAID_IN_TYPES = ("grant", "refund", "invoice")
+_PAID_IN_TYPES = ("grant", "refund", "invoice", "dispute")
 # Passthrough commits the hold before provider dispatch, so a crash before
 # release must not strand funds forever.
 _HOLD_TTL = timedelta(hours=1)
 _SUSPENDED_MESSAGE = "This organization is suspended; sign in at northrouter.ca to review your account details."
+logger = logging.getLogger(__name__)
 
 
 def _expired_condition(now: datetime) -> ColumnElement[bool]:
@@ -30,24 +37,127 @@ def _expired_condition(now: datetime) -> ColumnElement[bool]:
     )
 
 
+def get_org_concurrency_limit() -> int | None:
+    """Read and validate NORTHROUTER_ORG_CONCURRENCY_LIMIT from the environment."""
+    raw = os.getenv("NORTHROUTER_ORG_CONCURRENCY_LIMIT", "").strip()
+    if not raw:
+        return None
+    try:
+        limit = int(raw)
+    except ValueError as exc:
+        raise ValueError("NORTHROUTER_ORG_CONCURRENCY_LIMIT must be a positive integer") from exc
+    if limit < 1:
+        raise ValueError("NORTHROUTER_ORG_CONCURRENCY_LIMIT must be a positive integer")
+    return limit
+
+
+def get_min_available_usd() -> Decimal:
+    """Read and validate NORTHROUTER_MIN_AVAILABLE_USD from the environment."""
+    raw = os.getenv("NORTHROUTER_MIN_AVAILABLE_USD", "0").strip()
+    if not raw:
+        raw = "0"
+    try:
+        minimum = _money(Decimal(raw))
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValueError("NORTHROUTER_MIN_AVAILABLE_USD must be a non-negative finite decimal") from exc
+    if minimum < Decimal("0"):
+        raise ValueError("NORTHROUTER_MIN_AVAILABLE_USD must be a non-negative finite decimal")
+    return minimum
+
+
+def validate_billing_env() -> None:
+    """Validate overlay configuration variables during startup registration."""
+    get_fx_margin()
+    get_org_concurrency_limit()
+    get_min_available_usd()
+
+
+def _has_minimum_available(available: Decimal) -> bool:
+    minimum = get_min_available_usd()
+    return available > Decimal("0") and available >= minimum
+
+
 async def _insert_if_absent(
-    session: AsyncSession, model: type, values: dict[str, object], conflict_columns: list[str]
-) -> None:
+    session: AsyncSession, model: Any, values: dict[str, Any], conflict_columns: list[str]
+) -> bool:
     """Insert a row unless a concurrent writer already claimed the conflict key.
 
-    ``on_conflict_do_nothing`` is a dialect-specific construct, so the sqlite
-    and postgresql insert variants are chosen from the bound dialect; other
-    dialects fall back to a plain ORM insert, which is safe under the
-    single-writer guarantees those deployments make.
+    ``on_conflict_do_nothing`` is dialect-specific, so the SQLite and PostgreSQL
+    insert constructs are chosen from the bound dialect; other dialects check
+    before inserting. Returns True only when this call inserted the row.
     """
     dialect = session.get_bind().dialect.name
-    if dialect in ("sqlite", "postgresql"):
-        insert = sqlite_insert if dialect == "sqlite" else pg_insert
-        statement = insert(model).values(**values).on_conflict_do_nothing(index_elements=conflict_columns)
-        await session.execute(statement)
+    if dialect == "sqlite":
+        sqlite_stmt = sqlite_insert(model).values(**values).on_conflict_do_nothing(index_elements=conflict_columns)
+        result = await session.execute(sqlite_stmt)
+        return bool(getattr(result, "rowcount", 0) == 1)
+    if dialect == "postgresql":
+        pg_stmt = pg_insert(model).values(**values).on_conflict_do_nothing(index_elements=conflict_columns)
+        result = await session.execute(pg_stmt)
+        return bool(getattr(result, "rowcount", 0) == 1)
+    existing = await session.scalar(
+        select(model).where(*(getattr(model, name) == values[name] for name in conflict_columns))
+    )
+    if existing is not None:
+        return False
+    session.add(model(**values))
+    await session.flush()
+    return True
+
+
+async def _post_ledger(
+    session: AsyncSession,
+    *,
+    org_id: uuid.UUID,
+    entry_type: str,
+    amount: Decimal,
+    ref: str,
+    description: str | None = None,
+    actor_user_id: uuid.UUID | None = None,
+    api_key_id: str | None = None,
+    metadata_json: str | None = None,
+) -> bool:
+    """Insert a ledger entry and update ``nr_orgs.balance`` atomically under the org row lock.
+
+    The balance is updated only when the ledger insert actually lands
+    (``rowcount == 1``), so idempotent replays never double-apply a credit or
+    debit.
+    """
+    await session.flush()
+    now = datetime.now(UTC)
+    await session.execute(update(NrOrg).where(NrOrg.id == org_id).values(updated_at=now))
+    normalized_amount = _money(amount)
+    values: dict[str, Any] = {
+        "id": uuid.uuid4(),
+        "org_id": org_id,
+        "type": entry_type,
+        "amount": normalized_amount,
+        "ref": ref,
+        "created_at": now,
+        "actor_user_id": actor_user_id,
+        "api_key_id": api_key_id,
+        "description": description,
+        "metadata_json": metadata_json,
+    }
+    inserted = await _insert_if_absent(session, NrLedgerEntry, values, ["type", "ref"])
+    if not inserted:
+        return False
+
+    if entry_type in _PAID_IN_TYPES:
+        delta = normalized_amount
+    elif entry_type == "consume":
+        delta = _money(-normalized_amount)
     else:
-        session.add(model(**values))
-        await session.flush()
+        delta = Decimal("0.000000")
+
+    if delta != Decimal("0.000000"):
+        await session.execute(
+            update(NrOrg).where(NrOrg.id == org_id).values(balance=NrOrg.balance + delta, updated_at=now)
+        )
+        org_in_session = await session.get(NrOrg, org_id)
+        if org_in_session is not None:
+            await session.refresh(org_in_session)
+    return True
 
 
 class NorthRouterBillingAdapter(BillingPort):
@@ -67,10 +177,18 @@ class NorthRouterBillingAdapter(BillingPort):
         if org is not None:
             return org
 
+        if not await OrganizationService(session, membership_listener=None).has_organization(organization_id):
+            raise OrganizationNotFoundError(organization_id)
+
         await _insert_if_absent(
             session,
             NrOrg,
-            {"id": uuid.uuid4(), "otari_org_id": organization_id, "status": "active"},
+            {
+                "id": uuid.uuid4(),
+                "otari_org_id": organization_id,
+                "status": "active",
+                "balance": Decimal("0.000000"),
+            },
             ["otari_org_id"],
         )
         org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
@@ -78,18 +196,9 @@ class NorthRouterBillingAdapter(BillingPort):
             raise RuntimeError("Organization insert did not produce a billing row")
         return org
 
-    async def _amounts(self, org_id: uuid.UUID) -> tuple[Decimal, Decimal, Decimal]:
+    async def _amounts(self, org_id: uuid.UUID) -> tuple[Decimal, Decimal]:
         session = self._session()
-        paid_in = await session.scalar(
-            select(func.coalesce(func.sum(NrLedgerEntry.amount), 0)).where(
-                NrLedgerEntry.org_id == org_id, NrLedgerEntry.type.in_(_PAID_IN_TYPES)
-            )
-        )
-        consumed = await session.scalar(
-            select(func.coalesce(func.sum(NrLedgerEntry.amount), 0)).where(
-                NrLedgerEntry.org_id == org_id, NrLedgerEntry.type == "consume"
-            )
-        )
+        balance = await session.scalar(select(NrOrg.balance).where(NrOrg.id == org_id))
         now = datetime.now(UTC)
         held = await session.scalar(
             select(func.coalesce(func.sum(NrHold.amount), 0)).where(
@@ -98,50 +207,24 @@ class NorthRouterBillingAdapter(BillingPort):
                 ~_expired_condition(now),
             )
         )
-        return _money(paid_in or 0), _money(consumed or 0), _money(held or 0)
+        return _money(balance or 0), _money(held or 0)
 
     async def _check_org(self, organization_id: uuid.UUID) -> tuple[NrOrg, Decimal]:
-        org = await self._org(organization_id)
-        paid_in, consumed, _ = await self._amounts(org.id)
-        available = _money(paid_in - consumed)
+        session = self._session()
+        org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
+        if org is None:
+            raise InsufficientFundsError(_money(0))
+        balance, _ = await self._amounts(org.id)
+        available = _money(balance)
         if org.status != "active":
             raise InsufficientFundsError(available, _SUSPENDED_MESSAGE)
-        if available <= 0:
+        if not _has_minimum_available(available):
             raise InsufficientFundsError(available)
         return org, available
 
     async def apply_due_credit(self, *, organization_id: uuid.UUID) -> None:
-        org = await self._org(organization_id)
-        if org.status != "active":
-            return
-        session = self._session()
-        subscriptions = await session.scalars(
-            select(NrSubscription).where(
-                NrSubscription.org_id == org.id,
-                NrSubscription.status.in_(("active", "trialing")),
-                NrSubscription.current_period_end > datetime.now(UTC),
-            )
-        )
-        for subscription in subscriptions:
-            period_end = _as_utc(subscription.current_period_end)
-            ref = f"subscription:{subscription.stripe_subscription_id}:{period_end.isoformat()}"
-            exists = await session.scalar(
-                select(NrLedgerEntry.id).where(NrLedgerEntry.type == "grant", NrLedgerEntry.ref == ref)
-            )
-            if exists is None:
-                await _insert_if_absent(
-                    session,
-                    NrLedgerEntry,
-                    {
-                        "org_id": org.id,
-                        "type": "grant",
-                        "amount": subscription.credit_amount,
-                        "ref": ref,
-                        "description": f"Subscription credit for {subscription.plan}",
-                    },
-                    ["type", "ref"],
-                )
-        await session.flush()
+        """No-op: subscription credits are granted strictly on paid Stripe invoices."""
+        del organization_id
 
     async def require_funds_on_deposit(
         self,
@@ -167,51 +250,41 @@ class NorthRouterBillingAdapter(BillingPort):
         org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
         if org is None or org.status != "active":
             return False
-        paid_in, consumed, _ = await self._amounts(org.id)
-        owed = Decimal(0)
-        subscriptions = await session.scalars(
-            select(NrSubscription).where(
-                NrSubscription.org_id == org.id,
-                NrSubscription.status.in_(("active", "trialing")),
-                NrSubscription.current_period_end > datetime.now(UTC),
-            )
-        )
-        for subscription in subscriptions:
-            period_end = _as_utc(subscription.current_period_end)
-            ref = f"subscription:{subscription.stripe_subscription_id}:{period_end.isoformat()}"
-            exists = await session.scalar(
-                select(NrLedgerEntry.id).where(NrLedgerEntry.type == "grant", NrLedgerEntry.ref == ref)
-            )
-            if exists is None:
-                owed += subscription.credit_amount
-        return paid_in - consumed + owed > 0
+        balance, _ = await self._amounts(org.id)
+        return _has_minimum_available(balance)
 
     async def concurrency_limit(
         self, *, organization_id: uuid.UUID, billed: BilledModel, actor_user_id: uuid.UUID | None
     ) -> int | None:
         del organization_id, billed, actor_user_id
-        return None
+        return get_org_concurrency_limit()
 
     async def require_unheld_funds(self, *, organization_id: uuid.UUID) -> None:
-        org = await self._org(organization_id)
-        paid_in, consumed, held = await self._amounts(org.id)
-        available = _money(paid_in - consumed - held)
+        session = self._session()
+        org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
+        if org is None:
+            raise InsufficientFundsError(_money(0))
+        balance, held = await self._amounts(org.id)
+        available = _money(balance - held)
         if org.status != "active":
             raise InsufficientFundsError(available, _SUSPENDED_MESSAGE)
-        if available <= 0:
+        if not _has_minimum_available(available):
             raise InsufficientFundsError(available)
 
     async def hold(self, *, organization_id: uuid.UUID, amount: Decimal) -> None:
         amount = _money(amount)
         if amount <= 0:
             return
-        org = await self._org(organization_id)
-        # The no-op timestamp update obtains the organization row lock on
-        # PostgreSQL and the SQLite write lock before the balance is checked.
         session = self._session()
+        org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
+        if org is None:
+            raise InsufficientFundsError(_money(0))
+        # The timestamp update obtains the organization row lock on PostgreSQL
+        # and the SQLite write lock before the balance is checked.
         await session.execute(update(NrOrg).where(NrOrg.id == org.id).values(updated_at=datetime.now(UTC)))
-        paid_in, consumed, held = await self._amounts(org.id)
-        available = _money(paid_in - consumed - held)
+        await session.refresh(org)
+        balance, held = await self._amounts(org.id)
+        available = _money(balance - held)
         if org.status != "active":
             raise InsufficientFundsError(available, _SUSPENDED_MESSAGE)
         if available < amount:
@@ -225,14 +298,23 @@ class NorthRouterBillingAdapter(BillingPort):
         session.add(hold)
         await session.flush()
         hold.ref = f"hold:{hold.id}"
-        session.add(NrLedgerEntry(org_id=org.id, type="hold", amount=amount, ref=f"hold:{hold.id}"))
+        await _post_ledger(
+            session,
+            org_id=org.id,
+            entry_type="hold",
+            amount=amount,
+            ref=f"hold:{hold.id}",
+        )
 
     async def release_hold(self, *, organization_id: uuid.UUID, amount: Decimal) -> None:
         amount = _money(amount)
         if amount <= 0:
             return
-        org = await self._org(organization_id)
         session = self._session()
+        org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
+        if org is None:
+            logger.warning("No billing organization found for %s when releasing hold of %s", organization_id, amount)
+            return
         now = datetime.now(UTC)
         hold = await session.scalar(
             select(NrHold)
@@ -246,10 +328,17 @@ class NorthRouterBillingAdapter(BillingPort):
             .with_for_update(skip_locked=True)
         )
         if hold is None:
-            raise ValueError("No open hold matches this amount")
+            logger.warning("No open hold matches amount %s for organization %s", amount, organization_id)
+            return
         hold.state = "released"
         hold.released_at = datetime.now(UTC)
-        session.add(NrLedgerEntry(org_id=org.id, type="release", amount=amount, ref=f"release:{hold.id}"))
+        await _post_ledger(
+            session,
+            org_id=org.id,
+            entry_type="release",
+            amount=amount,
+            ref=f"release:{hold.id}",
+        )
         await session.flush()
 
     async def charge(
@@ -281,20 +370,15 @@ class NorthRouterBillingAdapter(BillingPort):
                 name: {"calls": usage.calls, "amount": str(_money(usage.amount))} for name, usage in tools.items()
             },
         }
-        self._session().add(
-            NrLedgerEntry(
-                org_id=org.id,
-                type="consume",
-                amount=amount,
-                ref=f"charge:{uuid.uuid4()}",
-                description=description,
-                actor_user_id=actor_user_id,
-                api_key_id=api_key_id,
-                metadata_json=json.dumps(audit, sort_keys=True, separators=(",", ":")),
-            )
+        await _post_ledger(
+            self._session(),
+            org_id=org.id,
+            entry_type="consume",
+            amount=amount,
+            ref=f"charge:{uuid.uuid4()}",
+            description=description,
+            actor_user_id=actor_user_id,
+            api_key_id=api_key_id,
+            metadata_json=json.dumps(audit, sort_keys=True, separators=(",", ":")),
         )
         await self._session().flush()
-
-
-def _as_utc(value: datetime) -> datetime:
-    return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)

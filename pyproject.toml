@@ -319,12 +319,16 @@ gateway = [
 [tool.ruff]
 target-version = "py313"
 line-length = 120
-src = ["src", "cli/src", "any-search/src", "any-fetch/src", "tests", "scripts"]
+src = ["src", "cli/src", "any-search/src", "any-fetch/src", "overlays/northrouter_billing", "tests", "scripts"]
 # `demo/` is shell scripts; nothing for ruff to do there.
 extend-exclude = ["demo/"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "PERF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["northrouter_billing"]
+known-third-party = ["alembic"]
 
 [tool.ruff.lint.per-file-ignores]
 "scripts/generate_openapi.py" = ["E402"]
@@ -335,7 +339,7 @@ python_version = "3.13"
 strict = true
 # The libraries' tests and scripts are checked one library at a time (Makefile,
 # typecheck-python), because the two have files of the same names.
-files = ["src", "cli/src", "any-search/src", "any-fetch/src", "tests", "scripts"]
+files = ["src", "cli/src", "any-search/src", "any-fetch/src", "overlays/northrouter_billing", "tests", "scripts"]
 # Standalone web-search adapters are independent services (own Dockerfile +
 # requirements), not part of the gateway package. They each ship a top-level
 # `app.py`, so type-checking them together trips mypy's duplicate-module guard.

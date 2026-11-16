@@ -6,6 +6,7 @@ from decimal import ROUND_HALF_UP, Decimal
 from typing import Any
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -56,6 +57,7 @@ class NrOrg(BillingBase):
     stripe_customer_id: Mapped[str | None] = mapped_column(String(255))
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
     suspend_reason: Mapped[str | None] = mapped_column(String(64))
+    balance: Mapped[Decimal] = mapped_column(UsdAmount(), nullable=False, default=lambda: Decimal("0.000000"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=lambda: datetime.now(UTC), onupdate=lambda: datetime.now(UTC)
@@ -85,7 +87,8 @@ class NrLedgerEntry(BillingBase):
 
     __table_args__ = (
         CheckConstraint(
-            "type IN ('grant', 'consume', 'hold', 'release', 'refund', 'invoice')", name="ck_nr_ledger_type"
+            "type IN ('grant', 'consume', 'hold', 'release', 'refund', 'invoice', 'dispute')",
+            name="ck_nr_ledger_type",
         ),
         UniqueConstraint("type", "ref", name="uq_nr_ledger_type_ref"),
         Index("ix_nr_ledger_org_created", "org_id", "created_at"),
@@ -114,22 +117,36 @@ class NrHold(BillingBase):
 
 
 class NrETransfer(BillingBase):
-    """Customer-submitted e-transfer awaiting operator review."""
+    """Customer-submitted CAD e-transfer awaiting operator review."""
 
     __tablename__ = "nr_e_transfers"
 
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("nr_orgs.id", ondelete="CASCADE"), index=True)
     amount: Mapped[Decimal] = mapped_column(UsdAmount(), nullable=False)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="CAD")
     reference: Mapped[str] = mapped_column(String(255), nullable=False)
+    reference_normalized: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    fx_rate: Mapped[Decimal | None] = mapped_column(UsdAmount())
+    fx_rate_date: Mapped[str | None] = mapped_column(String(32))
+    fx_source: Mapped[str | None] = mapped_column(String(64))
+    fx_margin: Mapped[Decimal | None] = mapped_column(UsdAmount())
+    credited_usd: Mapped[Decimal | None] = mapped_column(UsdAmount())
     reviewed_by: Mapped[str | None] = mapped_column(String(255))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
+    def __init__(self, **kwargs: Any) -> None:
+        if "reference" in kwargs and "reference_normalized" not in kwargs:
+            kwargs["reference_normalized"] = str(kwargs["reference"]).strip().lower()
+        if "currency" not in kwargs:
+            kwargs["currency"] = "CAD"
+        super().__init__(**kwargs)
+
     __table_args__ = (
         CheckConstraint("status IN ('pending', 'approved', 'rejected')", name="ck_nr_e_transfers_status"),
-        UniqueConstraint("org_id", "reference", name="uq_nr_e_transfers_org_reference"),
+        Index("uq_nr_e_transfers_reference_normalized", "reference_normalized", unique=True),
     )
 
 
@@ -141,10 +158,12 @@ class NrSubscription(BillingBase):
     id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
     org_id: Mapped[uuid.UUID] = mapped_column(Uuid, ForeignKey("nr_orgs.id", ondelete="CASCADE"), index=True)
     stripe_subscription_id: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    price_id: Mapped[str | None] = mapped_column(String(255))
     plan: Mapped[str] = mapped_column(String(255), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     current_period_end: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     credit_amount: Mapped[Decimal] = mapped_column(UsdAmount(), nullable=False)
+    last_event_created: Mapped[int | None] = mapped_column(BigInteger)
 
 
 class NrWebhookEvent(BillingBase):
