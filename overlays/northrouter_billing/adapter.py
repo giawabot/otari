@@ -2,14 +2,13 @@
 
 import json
 import logging
-import os
 import uuid
 from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import and_, case, func, or_, select, update
+from sqlalchemy import case, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,67 +17,27 @@ from sqlalchemy.sql.elements import ColumnElement
 from gateway.exceptions.organizations_exceptions import OrganizationNotFoundError
 from gateway.ports.billing_port import BilledModel, BillingPort, InsufficientFundsError, ToolUse
 from gateway.services.tenancy import OrganizationService
-from northrouter_billing.models import NrHold, NrLedgerEntry, NrOrg, _money
+from northrouter_billing.models import PAID_IN_TYPES, NrHold, NrLedgerEntry, NrOrg, _money
+from northrouter_billing.settings import BillingSettings, current_settings
 
-_PAID_IN_TYPES = ("grant", "refund", "invoice", "dispute")
 # Passthrough commits the hold before provider dispatch, so a crash before
 # release must not strand funds forever.
-_HOLD_TTL = timedelta(hours=1)
+HOLD_TTL = timedelta(hours=1)
 _SUSPENDED_MESSAGE = "This organization is suspended; sign in at northrouter.ca to review your account details."
+_ZERO = Decimal("0.000000")
 logger = logging.getLogger(__name__)
 
 
-def _expired_condition(now: datetime) -> ColumnElement[bool]:
-    """Predicate matching open holds whose expiration window has elapsed."""
-    return or_(
-        and_(NrHold.expires_at.is_(None), NrHold.created_at <= now - _HOLD_TTL),
-        NrHold.expires_at <= now,
-    )
+def expired_condition(now: datetime) -> ColumnElement[bool]:
+    """Predicate matching holds whose expiration time has passed."""
+    return NrHold.expires_at <= now
 
 
-def get_org_concurrency_limit() -> int | None:
-    """Read and validate NORTHROUTER_ORG_CONCURRENCY_LIMIT from the environment."""
-    raw = os.getenv("NORTHROUTER_ORG_CONCURRENCY_LIMIT", "").strip()
-    if not raw:
-        return None
-    try:
-        limit = int(raw)
-    except ValueError as exc:
-        raise ValueError("NORTHROUTER_ORG_CONCURRENCY_LIMIT must be a positive integer") from exc
-    if limit < 1:
-        raise ValueError("NORTHROUTER_ORG_CONCURRENCY_LIMIT must be a positive integer")
-    return limit
+def _has_minimum_available(available: Decimal, settings: BillingSettings) -> bool:
+    return available > 0 and available >= settings.min_available_usd
 
 
-def get_min_available_usd() -> Decimal:
-    """Read and validate NORTHROUTER_MIN_AVAILABLE_USD from the environment."""
-    raw = os.getenv("NORTHROUTER_MIN_AVAILABLE_USD", "0").strip()
-    if not raw:
-        raw = "0"
-    try:
-        minimum = _money(Decimal(raw))
-    except (InvalidOperation, TypeError, ValueError) as exc:
-        raise ValueError("NORTHROUTER_MIN_AVAILABLE_USD must be a non-negative finite decimal") from exc
-    if minimum < Decimal("0"):
-        raise ValueError("NORTHROUTER_MIN_AVAILABLE_USD must be a non-negative finite decimal")
-    return minimum
-
-
-def validate_billing_env() -> None:
-    """Validate overlay configuration variables during startup registration."""
-    service_token = os.getenv("NORTHROUTER_BILLING_SERVICE_TOKEN", "").strip()
-    if not service_token:
-        raise ValueError("NORTHROUTER_BILLING_SERVICE_TOKEN must be set and non-blank")
-    get_org_concurrency_limit()
-    get_min_available_usd()
-
-
-def _has_minimum_available(available: Decimal) -> bool:
-    minimum = get_min_available_usd()
-    return available > Decimal("0") and available >= minimum
-
-
-async def _insert_if_absent(
+async def insert_if_absent(
     session: AsyncSession, model: Any, values: dict[str, Any], conflict_columns: list[str]
 ) -> bool:
     """Insert a row unless a concurrent writer already claimed the conflict key.
@@ -106,7 +65,12 @@ async def _insert_if_absent(
     return True
 
 
-async def _post_ledger(
+async def lock_org(session: AsyncSession, org_id: uuid.UUID) -> None:
+    """Take the organization's row lock (PostgreSQL) or the write lock (SQLite) until the transaction ends."""
+    await session.execute(update(NrOrg).where(NrOrg.id == org_id).values(updated_at=datetime.now(UTC)))
+
+
+async def post_ledger(
     session: AsyncSession,
     *,
     org_id: uuid.UUID,
@@ -125,8 +89,8 @@ async def _post_ledger(
     debit.
     """
     await session.flush()
+    await lock_org(session, org_id)
     now = datetime.now(UTC)
-    await session.execute(update(NrOrg).where(NrOrg.id == org_id).values(updated_at=now))
     normalized_amount = _money(amount)
     values: dict[str, Any] = {
         "id": uuid.uuid4(),
@@ -140,18 +104,17 @@ async def _post_ledger(
         "description": description,
         "metadata_json": metadata_json,
     }
-    inserted = await _insert_if_absent(session, NrLedgerEntry, values, ["type", "ref"])
-    if not inserted:
+    if not await insert_if_absent(session, NrLedgerEntry, values, ["type", "ref"]):
         return False
 
-    if entry_type in _PAID_IN_TYPES:
+    if entry_type in PAID_IN_TYPES:
         delta = normalized_amount
     elif entry_type == "consume":
-        delta = _money(-normalized_amount)
+        delta = -normalized_amount
     else:
-        delta = Decimal("0.000000")
+        delta = _ZERO
 
-    if delta != Decimal("0.000000"):
+    if delta != _ZERO:
         await session.execute(
             update(NrOrg).where(NrOrg.id == org_id).values(balance=NrOrg.balance + delta, updated_at=now)
         )
@@ -161,70 +124,70 @@ async def _post_ledger(
     return True
 
 
+async def held_amount(session: AsyncSession, org_id: uuid.UUID, now: datetime) -> Decimal:
+    """What the organization's unexpired open holds claim."""
+    held = await session.scalar(
+        select(func.coalesce(func.sum(NrHold.amount), 0)).where(
+            NrHold.org_id == org_id,
+            NrHold.state == "open",
+            ~expired_condition(now),
+        )
+    )
+    return _money(held or 0)
+
+
 class NorthRouterBillingAdapter(BillingPort):
     """Billing adapter whose writes remain part of Otari's request transaction."""
 
-    def __init__(self, session: AsyncSession | None) -> None:
+    def __init__(self, session: AsyncSession | None, settings: BillingSettings | None = None) -> None:
         self.session = session
+        self._settings = settings
+
+    @property
+    def settings(self) -> BillingSettings:
+        return self._settings if self._settings is not None else current_settings()
 
     def _session(self) -> AsyncSession:
         if self.session is None:
             raise RuntimeError("NorthRouterBillingAdapter requires a request database session")
         return self.session
 
-    async def _org(self, organization_id: uuid.UUID) -> NrOrg:
+    async def _find(self, organization_id: uuid.UUID) -> NrOrg | None:
+        # Re-read the row even when the session holds it, so a gate never decides on a stale balance or status.
+        return await self._session().scalar(
+            select(NrOrg).where(NrOrg.otari_org_id == organization_id).execution_options(populate_existing=True)
+        )
+
+    async def ensure_org(self, organization_id: uuid.UUID) -> NrOrg:
+        """The organization's billing row, created on first use for an Otari organization that exists."""
         session = self._session()
-        org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
+        org = await self._find(organization_id)
         if org is not None:
             return org
 
         if not await OrganizationService(session, membership_listener=None).has_organization(organization_id):
             raise OrganizationNotFoundError(organization_id)
 
-        await _insert_if_absent(
+        await insert_if_absent(
             session,
             NrOrg,
             {
                 "id": uuid.uuid4(),
                 "otari_org_id": organization_id,
                 "status": "active",
-                "balance": Decimal("0.000000"),
+                "balance": _ZERO,
+                "created_at": datetime.now(UTC),
+                "updated_at": datetime.now(UTC),
             },
             ["otari_org_id"],
         )
-        org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
+        org = await self._find(organization_id)
         if org is None:
             raise RuntimeError("Organization insert did not produce a billing row")
         return org
 
-    async def _amounts(self, org_id: uuid.UUID) -> tuple[Decimal, Decimal]:
-        session = self._session()
-        balance = await session.scalar(select(NrOrg.balance).where(NrOrg.id == org_id))
-        now = datetime.now(UTC)
-        held = await session.scalar(
-            select(func.coalesce(func.sum(NrHold.amount), 0)).where(
-                NrHold.org_id == org_id,
-                NrHold.state == "open",
-                ~_expired_condition(now),
-            )
-        )
-        return _money(balance or 0), _money(held or 0)
-
-    async def _check_org(self, organization_id: uuid.UUID) -> tuple[NrOrg, Decimal]:
-        session = self._session()
-        org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
-        if org is None:
-            raise InsufficientFundsError(_money(0))
-        balance, _ = await self._amounts(org.id)
-        available = _money(balance)
-        if org.status != "active":
-            raise InsufficientFundsError(available, _SUSPENDED_MESSAGE)
-        if not _has_minimum_available(available):
-            raise InsufficientFundsError(available)
-        return org, available
-
     async def apply_due_credit(self, *, organization_id: uuid.UUID) -> None:
-        """No-op: subscription credits are granted strictly after paid invoices."""
+        """No-op: credit is granted by the billing service, never accrued here."""
         del organization_id
 
     async def require_funds_on_deposit(
@@ -236,7 +199,14 @@ class NorthRouterBillingAdapter(BillingPort):
         actor_user_id: uuid.UUID | None,
     ) -> None:
         del billed, tools, actor_user_id
-        await self._check_org(organization_id)
+        org = await self._find(organization_id)
+        if org is None:
+            raise InsufficientFundsError(_ZERO)
+        available = _money(org.balance)
+        if org.status != "active":
+            raise InsufficientFundsError(available, _SUSPENDED_MESSAGE)
+        if not _has_minimum_available(available, self.settings):
+            raise InsufficientFundsError(available)
 
     async def has_funds_on_deposit(
         self,
@@ -247,29 +217,26 @@ class NorthRouterBillingAdapter(BillingPort):
         actor_user_id: uuid.UUID | None,
     ) -> bool:
         del billed, tools, actor_user_id
-        session = self._session()
-        org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
+        org = await self._find(organization_id)
         if org is None or org.status != "active":
             return False
-        balance, _ = await self._amounts(org.id)
-        return _has_minimum_available(balance)
+        return _has_minimum_available(_money(org.balance), self.settings)
 
     async def concurrency_limit(
         self, *, organization_id: uuid.UUID, billed: BilledModel, actor_user_id: uuid.UUID | None
     ) -> int | None:
         del organization_id, billed, actor_user_id
-        return get_org_concurrency_limit()
+        return self.settings.concurrency_limit
 
     async def require_unheld_funds(self, *, organization_id: uuid.UUID) -> None:
         session = self._session()
-        org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
+        org = await self._find(organization_id)
         if org is None:
-            raise InsufficientFundsError(_money(0))
-        balance, held = await self._amounts(org.id)
-        available = _money(balance - held)
+            raise InsufficientFundsError(_ZERO)
+        available = _money(org.balance - await held_amount(session, org.id, datetime.now(UTC)))
         if org.status != "active":
             raise InsufficientFundsError(available, _SUSPENDED_MESSAGE)
-        if not _has_minimum_available(available):
+        if not _has_minimum_available(available, self.settings):
             raise InsufficientFundsError(available)
 
     async def hold(self, *, organization_id: uuid.UUID, amount: Decimal) -> None:
@@ -277,54 +244,45 @@ class NorthRouterBillingAdapter(BillingPort):
         if amount <= 0:
             return
         session = self._session()
-        org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
+        org = await self._find(organization_id)
         if org is None:
-            raise InsufficientFundsError(_money(0))
-        # The timestamp update obtains the organization row lock on PostgreSQL
-        # and the SQLite write lock before the balance is checked.
-        await session.execute(update(NrOrg).where(NrOrg.id == org.id).values(updated_at=datetime.now(UTC)))
+            raise InsufficientFundsError(_ZERO)
+        # Lock before reading the balance, so overlapping holds decide one at a time.
+        await lock_org(session, org.id)
         await session.refresh(org)
-        balance, held = await self._amounts(org.id)
-        available = _money(balance - held)
+        now = datetime.now(UTC)
+        available = _money(org.balance - await held_amount(session, org.id, now))
         if org.status != "active":
             raise InsufficientFundsError(available, _SUSPENDED_MESSAGE)
         if available < amount:
             raise InsufficientFundsError(available)
-        hold = NrHold(
-            org_id=org.id,
-            amount=amount,
-            state="open",
-            expires_at=datetime.now(UTC) + _HOLD_TTL,
-        )
+        hold = NrHold(org_id=org.id, amount=amount, state="open", created_at=now, expires_at=now + HOLD_TTL)
         session.add(hold)
         await session.flush()
         hold.ref = f"hold:{hold.id}"
-        await _post_ledger(
-            session,
-            org_id=org.id,
-            entry_type="hold",
-            amount=amount,
-            ref=f"hold:{hold.id}",
-        )
+        await post_ledger(session, org_id=org.id, entry_type="hold", amount=amount, ref=hold.ref)
 
     async def release_hold(self, *, organization_id: uuid.UUID, amount: Decimal) -> None:
+        """Release one open hold of ``amount``, preferring one that has not expired.
+
+        The port names a hold by its amount alone. If the sweep already released
+        this caller's expired hold, the release lands on another open hold of the
+        same amount, which ends that hold early; totals stay right, and the TTL is
+        far longer than any call that takes a hold.
+        """
         amount = _money(amount)
         if amount <= 0:
             return
         session = self._session()
-        org = await session.scalar(select(NrOrg).where(NrOrg.otari_org_id == organization_id))
+        org = await self._find(organization_id)
         if org is None:
             logger.warning("No billing organization found for %s when releasing hold of %s", organization_id, amount)
             return
         now = datetime.now(UTC)
         hold = await session.scalar(
             select(NrHold)
-            .where(
-                NrHold.org_id == org.id,
-                NrHold.amount == amount,
-                NrHold.state == "open",
-            )
-            .order_by(case((_expired_condition(now), 1), else_=0), NrHold.created_at, NrHold.id)
+            .where(NrHold.org_id == org.id, NrHold.amount == amount, NrHold.state == "open")
+            .order_by(case((expired_condition(now), 1), else_=0), NrHold.created_at, NrHold.id)
             .limit(1)
             .with_for_update(skip_locked=True)
         )
@@ -332,14 +290,8 @@ class NorthRouterBillingAdapter(BillingPort):
             logger.warning("No open hold matches amount %s for organization %s", amount, organization_id)
             return
         hold.state = "released"
-        hold.released_at = datetime.now(UTC)
-        await _post_ledger(
-            session,
-            org_id=org.id,
-            entry_type="release",
-            amount=amount,
-            ref=f"release:{hold.id}",
-        )
+        hold.released_at = now
+        await post_ledger(session, org_id=org.id, entry_type="release", amount=amount, ref=f"release:{hold.id}")
         await session.flush()
 
     async def charge(
@@ -356,14 +308,10 @@ class NorthRouterBillingAdapter(BillingPort):
         amount = _money(amount)
         if amount < 0:
             raise ValueError("A charge amount cannot be negative")
-        org = await self._org(organization_id)
+        org = await self.ensure_org(organization_id)
         audit = {
             "billed": (
-                {
-                    "provider": billed.provider,
-                    "model": billed.model,
-                    "open_weights": billed.open_weights,
-                }
+                {"provider": billed.provider, "model": billed.model, "open_weights": billed.open_weights}
                 if billed is not None
                 else None
             ),
@@ -371,7 +319,7 @@ class NorthRouterBillingAdapter(BillingPort):
                 name: {"calls": usage.calls, "amount": str(_money(usage.amount))} for name, usage in tools.items()
             },
         }
-        await _post_ledger(
+        await post_ledger(
             self._session(),
             org_id=org.id,
             entry_type="consume",
