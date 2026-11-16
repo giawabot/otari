@@ -85,7 +85,8 @@ compares `nr_*` tables, so it never proposes changes to Otari's schema.
 The chain was reset to a single `nr_0001_initial` revision before the overlay
 was first deployed. A development database migrated with an earlier revision
 needs its `nr_*` tables and `nr_alembic_version` dropped once before
-`upgrade head`.
+`upgrade head`; `overlays/scripts/reset_dev_db.py` does exactly that (dry run
+by default, `--yes` to apply, `nr_*` tables only — never Otari's).
 
 ## Route surface
 
