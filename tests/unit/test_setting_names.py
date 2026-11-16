@@ -55,6 +55,7 @@ _SETTING_NAMES = frozenset(
         "db_statement_timeout_ms",
         "decision_providers",
         "default_pricing",
+        "deployment_paid_jobs",
         "docs_url",
         "email_verification_expiry_hours",
         "enable_docs",

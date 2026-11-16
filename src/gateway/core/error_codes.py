@@ -56,6 +56,8 @@ WRONG_MODEL_TYPE = "wrong_model_type"
 PRICING_REQUIRED = "pricing_required"
 # The organization has no funds paid in to cover a request the deployment pays for.
 INSUFFICIENT_FUNDS = "insufficient_funds"
+# ``deployment_paid_jobs`` is off and a batch or video job would run on a credential the deployment pays for.
+DEPLOYMENT_PAID_JOB_REFUSED = "deployment_paid_job_refused"
 END_USER_BUDGET_NOT_ALLOWED = "end_user_budget_not_allowed"
 # Otari-End-User-Budget on a request that names no end user of a service key, so no budget would apply.
 END_USER_BUDGET_WITHOUT_END_USER = "end_user_budget_without_end_user"

@@ -195,6 +195,7 @@ async def create_video(
         refuse_model=refuse_model,
         refuse_unpriced=refuse_unpriced,
         relabel=False,
+        deferred_job=True,
     )
     job = outcome.result
     try:

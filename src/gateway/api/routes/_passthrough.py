@@ -57,6 +57,7 @@ from gateway.api.routes._attempts import classify_local_attempt_error
 from gateway.api.routes._helpers import (
     country_gate_for,
     country_not_supported,
+    deployment_paid_job_refused,
     missing_credential_error,
     with_retry_hint,
 )
@@ -367,6 +368,7 @@ async def run_passthrough(
     reserve_before_resolve: bool = False,
     relabel: bool = True,
     price_facts: PriceFacts = NO_FACTS,
+    deferred_job: bool = False,
 ) -> PassthroughOutcome[ResultT]:
     """Run the shared pass-through scaffold around a single provider call.
 
@@ -429,6 +431,9 @@ async def run_passthrough(
             pricing resolve first (the pricing key is the resolved instance).
         relabel: Rewrite the result's ``model`` field to the configured alias
             the caller used, so responses do not echo the aliased target.
+        deferred_job: The call starts a job the route settles later (a video),
+            which ``config.deployment_paid_jobs`` may refuse to run on a
+            credential the deployment pays for.
 
     Returns:
         The provider result plus the resolved selector and rate-limit headers.
@@ -600,6 +605,11 @@ async def run_passthrough(
             ) from exc
         if served is None:
             return None
+        if deferred_job and not config.deployment_paid_jobs:
+            refused_job = deployment_paid_job_refused()
+            raise await _refuse(
+                reservation, served, refused_job.status_code, str(refused_job.detail), **(refused_job.headers or {})
+            )
         try:
             charge = await admit_deployment_paid(
                 billing_port_on(raw_request, db),

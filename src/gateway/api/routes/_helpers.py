@@ -20,7 +20,7 @@ from gateway.core.config import (
     ROUTER_HEADER,
 )
 from gateway.core.database import DATA_ERRORS, DATABASE_ERRORS, describe_database_error
-from gateway.core.error_codes import COUNTRY_NOT_SUPPORTED, error_headers
+from gateway.core.error_codes import COUNTRY_NOT_SUPPORTED, DEPLOYMENT_PAID_JOB_REFUSED, error_headers
 from gateway.log_config import logger
 from gateway.models.tenancy import Workspace
 from gateway.ports.telemetry_storage_port import TelemetryStoragePort
@@ -289,6 +289,21 @@ def country_not_supported(gate: CountryGate, selector: str, *, noun: str = "Mode
         status_code=status.HTTP_403_FORBIDDEN,
         detail=gate.refusal_detail(selector, noun=noun),
         headers=error_headers(COUNTRY_NOT_SUPPORTED),
+    )
+
+
+DEPLOYMENT_PAID_JOB_REFUSED_DETAIL = (
+    "This deployment does not run batch or video jobs on its own provider credentials. "
+    "Add your organization's own key for this provider to run the job."
+)
+
+
+def deployment_paid_job_refused() -> HTTPException:
+    """The 403 for a batch or video job that would run on a credential the deployment pays for."""
+    return HTTPException(
+        status_code=status.HTTP_403_FORBIDDEN,
+        detail=DEPLOYMENT_PAID_JOB_REFUSED_DETAIL,
+        headers=error_headers(DEPLOYMENT_PAID_JOB_REFUSED),
     )
 
 
