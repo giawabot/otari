@@ -46,6 +46,7 @@ class ApiKeyRepository(BaseRepository[APIKey, Never, Never]):
                 workspace_id=workspace_id,
                 self_service=True,
                 exclude_from_budget=False,
+                oauth_client_id=client_id,
                 metadata_={"oauth_client_id": client_id},
             )
         )

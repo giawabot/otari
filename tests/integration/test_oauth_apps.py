@@ -96,6 +96,7 @@ def test_approved_key_is_owned_budget_enforced_and_single_use(
         assert key.workspace_id == world.workspaces["alpha_one"]
         assert key.self_service and not key.exclude_from_budget and not key.is_service_key
         assert key.metadata_["oauth_client_id"] == "thunderbolt"
+        assert key.oauth_client_id == "thunderbolt"
         assert db.scalars(select(OAuthAppGrant)).first() is None
     assert redeem(client, code).status_code == 400
     headers = {"Authorization": f"Bearer {result.json()['access_token']}"}
@@ -498,3 +499,36 @@ def test_authorization_uses_the_deployments_configured_dashboard(
     response = client.get(f"{API_ROOT}/oauth/apps/authorize", params=params, follow_redirects=False)
     assert response.status_code == 302
     assert response.headers["location"].startswith("https://example.com/dashboard/?edge=one#/oauth/authorize?")
+
+
+def test_only_the_grant_exchange_records_an_app_on_a_key(
+    client: TestClient, world: _World, db_session_factory: Callable[[], Session]
+) -> None:
+    """A member can write ``metadata.oauth_client_id`` on a key of their own, but never the column an app trusts."""
+    session = {"Cookie": f"{SESSION_COOKIE_NAME}={world.sessions['alpha_member']}"}
+    forged = client.post(
+        f"{API_ROOT}/organizations/me/keys",
+        json={
+            "key_name": "forged",
+            "workspace_id": str(world.workspaces["alpha_one"]),
+            "metadata": {"oauth_client_id": "thunderbolt"},
+        },
+        headers=session,
+    )
+    assert forged.status_code == 200, forged.text
+    redeem(client, code_from(approve(client, world)))
+    with db_session_factory() as db:
+        keys = {
+            key.key_name: key
+            for key in db.scalars(select(APIKey).where(APIKey.user_id == str(world.users["alpha_member"])))
+        }
+    assert keys["forged"].metadata_["oauth_client_id"] == "thunderbolt"
+    assert keys["forged"].oauth_client_id is None
+    app_key = next(key for name, key in keys.items() if name != "forged")
+    assert app_key.oauth_client_id == "thunderbolt"
+
+    cleared = client.patch(f"{API_ROOT}/organizations/me/keys/{app_key.id}", json={"metadata": {}}, headers=session)
+    assert cleared.status_code == 200, cleared.text
+    with db_session_factory() as db:
+        reloaded = db.get(APIKey, app_key.id)
+        assert reloaded is not None and reloaded.oauth_client_id == "thunderbolt"
