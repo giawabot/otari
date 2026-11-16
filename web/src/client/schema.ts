@@ -4095,6 +4095,26 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/organizations/me/my-budget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Get Caller Organization Budget
+         * @description Get the binding personal spend ceiling for the caller in their active organization.
+         */
+        get: operations["organizations-get_caller_organization_budget"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/organizations/me/pending-memberships": {
         parameters: {
             query?: never;
@@ -15459,6 +15479,42 @@ export interface components {
             provider_raw?: {
                 [key: string]: unknown;
             } | null;
+        };
+        /**
+         * MyBudgetPublic
+         * @description The binding personal spend ceiling for the caller in their active organization.
+         */
+        MyBudgetPublic: {
+            /**
+             * Cadence
+             * @description Reset cadence of the budget, or null when it never resets
+             */
+            cadence: string | null;
+            /**
+             * Max Budget
+             * @description Maximum spend in USD over the current period
+             */
+            max_budget: number;
+            /**
+             * Next Reset At
+             * @description When the current period ends in ISO-8601 UTC, or null when it never resets
+             */
+            next_reset_at: string | null;
+            /**
+             * Remaining
+             * @description Dollars remaining before the ceiling refuses (max_budget - spend - reserved, floored at 0)
+             */
+            remaining: number;
+            /**
+             * Reserved
+             * @description Spend held by in-flight requests
+             */
+            reserved: number;
+            /**
+             * Spend
+             * @description Spend recorded in the current period
+             */
+            spend: number;
         };
         /**
          * NoulCriteria
@@ -29825,6 +29881,35 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    "organizations-get_caller_organization_budget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["MyBudgetPublic"];
+                };
+            };
+            /** @description No personal spend ceiling applies to the caller in their active organization. */
+            404: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OrganizationRefusal"];
                 };
             };
         };

@@ -711,10 +711,26 @@ class KeyBudgetPublic(BaseModel):
     )
 
 
+class MyBudgetPublic(BaseModel):
+    """The binding personal spend ceiling for the caller in their active organization."""
+
+    max_budget: float = Field(description="Maximum spend in USD over the current period")
+    spend: float = Field(description="Spend recorded in the current period")
+    reserved: float = Field(description="Spend held by in-flight requests")
+    remaining: float = Field(
+        description="Dollars remaining before the ceiling refuses (max_budget - spend - reserved, floored at 0)"
+    )
+    next_reset_at: str | None = Field(
+        description="When the current period ends in ISO-8601 UTC, or null when it never resets"
+    )
+    cadence: str | None = Field(description="Reset cadence of the budget, or null when it never resets")
+
+
 __all__ = [
     "KeyBudgetPublic",
     "KeyEndUsersPublic",
     "KeyLimitPublic",
+    "MyBudgetPublic",
     "BUDGET_ID_PATTERN",
     "BudgetResetLogResponse",
     "BudgetResponse",

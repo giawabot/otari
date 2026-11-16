@@ -725,6 +725,13 @@ class OrganizationService:
             None if organization_member is None else organization_member.id,
         )
 
+    async def get_caller_member_scope_ids(self, *, user: User) -> tuple[uuid.UUID, list[uuid.UUID]]:
+        """Return the IDs of the caller's active organization membership and active workspace memberships in it."""
+        organization = await self.get_active_organization_for_user(user)
+        membership = await self._require_active_membership(user, organization)
+        placements = await self.members.placements_for_users(organization.id, [user.id])
+        return membership.id, [workspace_membership.id for workspace_membership, _ in placements.get(user.id, [])]
+
     async def get_workspace_ids_in_organization(self, organization_id: uuid.UUID) -> list[uuid.UUID]:
         """Return the ID of every workspace in an organization."""
         return await self.workspace_rows.get_ids_by_organization(organization_id)

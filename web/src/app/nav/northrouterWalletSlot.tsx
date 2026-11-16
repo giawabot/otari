@@ -4,11 +4,15 @@ import { FiCreditCard as FiWallet } from "react-icons/fi"
 
 import { NAV_ICON_CLASS } from "@/app/nav/rowStyles"
 import { canManage } from "@/features/organization/roles"
-import { useNorthRouterAccount } from "@/shared/api/northrouterBilling"
+import {
+  useMyBudget,
+  useNorthRouterAccount,
+} from "@/shared/api/northrouterBilling"
 import { useOrganizationContext } from "@/shared/api/organizations"
 import { formatUsd } from "@/shared/helpers/format"
 
 const WALLET_LABEL = "NorthRouter credit available"
+const MY_BUDGET_LABEL = "My budget remaining"
 
 const CHIP_CLASS =
   "flex min-h-[2.125rem] items-center gap-1.5 px-1 text-shell-label font-medium text-muted"
@@ -30,24 +34,48 @@ function WalletNavChip() {
     enabled: isManager,
     organizationId,
   })
+  const myBudget = useMyBudget({
+    enabled: !isManager,
+    organizationId,
+  })
 
-  if (!isManager || account.isPending || account.isError || !account.data) {
+  if (isManager) {
+    if (account.isPending || account.isError || !account.data) {
+      return null
+    }
+    const available = Number(account.data.available)
+    if (!Number.isFinite(available)) {
+      return null
+    }
+    return (
+      <output
+        aria-label={WALLET_LABEL}
+        title={WALLET_LABEL}
+        className={CHIP_CLASS}
+      >
+        <FiWallet className={NAV_ICON_CLASS} aria-hidden="true" />
+        <span>{formatUsd(available)}</span>
+      </output>
+    )
+  }
+
+  if (myBudget.isPending || myBudget.isError || !myBudget.data) {
     return null
   }
 
-  const available = Number(account.data.available)
-  if (!Number.isFinite(available)) {
+  const remaining = Number(myBudget.data.remaining)
+  if (!Number.isFinite(remaining)) {
     return null
   }
 
   return (
     <output
-      aria-label={WALLET_LABEL}
-      title={WALLET_LABEL}
+      aria-label={MY_BUDGET_LABEL}
+      title={MY_BUDGET_LABEL}
       className={CHIP_CLASS}
     >
       <FiWallet className={NAV_ICON_CLASS} aria-hidden="true" />
-      <span>{formatUsd(available)}</span>
+      <span>{formatUsd(remaining)}</span>
     </output>
   )
 }

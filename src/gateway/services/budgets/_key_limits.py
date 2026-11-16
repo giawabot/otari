@@ -5,11 +5,13 @@ from collections.abc import Sequence
 from datetime import UTC, datetime
 from decimal import Decimal
 
+from gateway.exceptions.budget_exceptions import OrganizationMemberBudgetNotFoundError
 from gateway.models.api_keys import APIKey
 from gateway.models.budgets import SCOPE_ORGANIZATION, SCOPE_WORKSPACE
-from gateway.models.money import as_float
+from gateway.models.money import as_float, to_usd
+from gateway.models.tenancy import User
 from gateway.repositories.budgets import BudgetRepositories, CeilingUsage, LimitUsage, ScopeIdSets
-from gateway.schemas.budgets import KeyBudgetPublic, KeyLimitPublic
+from gateway.schemas.budgets import KeyBudgetPublic, KeyLimitPublic, MyBudgetPublic
 from gateway.services.budgets._periods import period_window
 from gateway.services.budgets._scoped_enforcement import SCOPE_PRECEDENCE, identity_uuid
 from gateway.services.organizations import UserAccess
@@ -57,6 +59,26 @@ class _KeyLimits:
         now = datetime.now(UTC)
         public = [_public(limit, now) for limit in limits]
         return KeyBudgetPublic(budgets_enforced=True, remaining_usd=_least_remaining(public), limits=public)
+
+    async def my_budget(self, user: User) -> MyBudgetPublic:
+        """The binding personal spend ceiling for the caller in their active organization."""
+        org_member_id, workspace_member_ids = await self._organizations.get_caller_member_scope_ids(user=user)
+        limits: list[LimitUsage] = []
+        user_limit = await self._user_limit(str(user.id))
+        if user_limit is not None:
+            limits.append(user_limit)
+        scopes = ScopeIdSets(
+            organization_ids=(),
+            workspace_ids=(),
+            organization_member_ids=(str(org_member_id),),
+            workspace_member_ids=tuple(str(member_id) for member_id in workspace_member_ids),
+            api_key_ids=(),
+        )
+        limits.extend(await self._ceilings.usage_in_scopes(scopes))
+        binding = _binding_my_budget(limits, datetime.now(UTC))
+        if binding is None:
+            raise OrganizationMemberBudgetNotFoundError
+        return binding
 
     async def _user_limit(self, user_id: str) -> LimitUsage | None:
         """The budget a user is on with the user's use of it, or None when it is on none."""
@@ -154,3 +176,54 @@ def _least_remaining(limits: Sequence[KeyLimitPublic]) -> float | None:
     """The fewest dollars any cap on every provider leaves, or None when none caps dollars."""
     remaining = [limit.remaining_usd for limit in limits if limit.provider is None and limit.remaining_usd is not None]
     return min(remaining) if remaining else None
+
+
+def _cadence_of_limit(limit: LimitUsage) -> str | None:
+    if limit.reset_alignment is not None:
+        return limit.reset_alignment
+    if limit.budget_duration_sec is not None:
+        return f"{limit.budget_duration_sec}s"
+    return None
+
+
+def _binding_my_budget(limits: Sequence[LimitUsage], now: datetime) -> MyBudgetPublic | None:
+    """Pick the personal dollar ceiling leaving the smallest remaining headroom at ``now``."""
+    candidates: list[tuple[Decimal, int, Decimal, MyBudgetPublic]] = []
+    for limit in limits:
+        usage = limit.usage
+        if usage.max_budget is None:
+            continue
+        resets_at = usage.period_end
+        ended = resets_at is not None and now >= resets_at
+        if ended:
+            try:
+                window = period_window(now, duration=limit.budget_duration_sec, alignment=limit.reset_alignment)
+            except ValueError:
+                window = None
+                ended = False
+            else:
+                resets_at = None if window is None else window[1]
+        max_budget = to_usd(usage.max_budget)
+        spent = Decimal(0) if ended else to_usd(usage.current_spend)
+        reserved = to_usd(usage.reserved_spend)
+        remaining = max(Decimal(0), max_budget - spent - reserved)
+        precedence = SCOPE_PRECEDENCE.get(limit.scope, len(SCOPE_PRECEDENCE))
+        candidates.append(
+            (
+                remaining,
+                precedence,
+                max_budget,
+                MyBudgetPublic(
+                    max_budget=float(max_budget),
+                    spend=float(spent),
+                    reserved=float(reserved),
+                    remaining=float(remaining),
+                    next_reset_at=resets_at.isoformat() if resets_at is not None else None,
+                    cadence=_cadence_label if (_cadence_label := _cadence_of_limit(limit)) is not None else None,
+                ),
+            )
+        )
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: (item[0], item[1], item[2]))
+    return candidates[0][3]

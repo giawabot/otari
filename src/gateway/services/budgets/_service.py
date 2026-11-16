@@ -28,6 +28,7 @@ from gateway.schemas.budgets import (
     EndUserPublic,
     KeyBudgetPublic,
     KeyEndUsersPublic,
+    MyBudgetPublic,
     OrganizationBudgetCreate,
     OrganizationBudgetPublic,
     OrganizationBudgetsPublic,
@@ -334,6 +335,11 @@ class BudgetService:
             else:
                 found = await self._key_limits.read(api_key)
         return found.model_copy(update={"end_users": end_users})
+
+    async def get_my_organization_budget(self, *, user: User) -> MyBudgetPublic:
+        """Return the binding personal spend ceiling for the caller in their active organization."""
+        async with self._uow:
+            return await self._key_limits.my_budget(user)
 
     async def minute_limits(self, user_id: str, *, strategy: str | None) -> BudgetMinuteLimits | None:
         """The user's own budget and its per-minute limits, or None when the user is on none or budgets are disabled."""

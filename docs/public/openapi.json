@@ -14791,6 +14791,65 @@
         "title": "ModerationResult",
         "type": "object"
       },
+      "MyBudgetPublic": {
+        "description": "The binding personal spend ceiling for the caller in their active organization.",
+        "properties": {
+          "cadence": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Reset cadence of the budget, or null when it never resets",
+            "title": "Cadence"
+          },
+          "max_budget": {
+            "description": "Maximum spend in USD over the current period",
+            "title": "Max Budget",
+            "type": "number"
+          },
+          "next_reset_at": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the current period ends in ISO-8601 UTC, or null when it never resets",
+            "title": "Next Reset At"
+          },
+          "remaining": {
+            "description": "Dollars remaining before the ceiling refuses (max_budget - spend - reserved, floored at 0)",
+            "title": "Remaining",
+            "type": "number"
+          },
+          "reserved": {
+            "description": "Spend held by in-flight requests",
+            "title": "Reserved",
+            "type": "number"
+          },
+          "spend": {
+            "description": "Spend recorded in the current period",
+            "title": "Spend",
+            "type": "number"
+          }
+        },
+        "required": [
+          "max_budget",
+          "spend",
+          "reserved",
+          "remaining",
+          "next_reset_at",
+          "cadence"
+        ],
+        "title": "MyBudgetPublic",
+        "type": "object"
+      },
       "NoulCriteria": {
         "additionalProperties": true,
         "description": "What a yes and a no each mean, for a ``noul`` question.",
@@ -44388,6 +44447,46 @@
         "summary": "Set Organization Model Override",
         "tags": [
           "model-overrides"
+        ]
+      }
+    },
+    "/api/v1/organizations/me/my-budget": {
+      "get": {
+        "description": "Get the binding personal spend ceiling for the caller in their active organization.",
+        "operationId": "organizations-get_caller_organization_budget",
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MyBudgetPublic"
+                }
+              }
+            },
+            "description": "Successful Response"
+          },
+          "404": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/OrganizationRefusal"
+                }
+              }
+            },
+            "description": "No personal spend ceiling applies to the caller in their active organization."
+          }
+        },
+        "security": [
+          {
+            "ApiKeyAuth": []
+          },
+          {
+            "XApiKeyAuth": []
+          }
+        ],
+        "summary": "Get Caller Organization Budget",
+        "tags": [
+          "organizations"
         ]
       }
     },
