@@ -67,7 +67,6 @@ _SETTING_NAMES = frozenset(
         "federation_member_rules",
         "feedback_enabled",
         "fetch_tools",
-        "file_understanding_enabled",
         "files_backend",
         "files_enabled",
         "files_gemini_inline_max_bytes",
