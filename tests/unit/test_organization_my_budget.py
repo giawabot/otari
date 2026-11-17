@@ -86,7 +86,7 @@ def _service_with_limits(
 
 @pytest.mark.asyncio
 async def test_member_with_workspace_member_ceiling_sees_remaining_including_reserved() -> None:
-    reset_at = datetime(2026, 12, 1, 0, 0, tzinfo=UTC)
+    reset_at = datetime.now(UTC) + timedelta(days=10)
     user = User(id=uuid.uuid4(), email="member@example.com")
     service = _service_with_limits(
         [
@@ -113,8 +113,9 @@ async def test_member_with_workspace_member_ceiling_sees_remaining_including_res
 
 @pytest.mark.asyncio
 async def test_member_with_two_applicable_ceilings_gets_the_binding_smallest_one() -> None:
-    org_reset = datetime(2026, 12, 1, 0, 0, tzinfo=UTC)
-    ws_reset = datetime(2026, 11, 17, 0, 0, tzinfo=UTC)
+    now = datetime.now(UTC)
+    org_reset = now + timedelta(days=14)
+    ws_reset = now + timedelta(days=1)
     user = User(id=uuid.uuid4(), email="member@example.com")
     service = _service_with_limits(
         [
