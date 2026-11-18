@@ -178,8 +178,10 @@ from gateway.exceptions.tools_exceptions import (
     CodeExecutionRefusedError,
     ContainerOnManagedCredentialError,
     GatewayToolPricingRequiredError,
+    McpConnectionUnavailableError,
     McpServerConfigurationError,
     McpServerDeclarationError,
+    McpSignInRequiredError,
     SearchToolMisconfiguredError,
     WebAccessRefusedError,
     WebSearchCredentialRefusedError,
@@ -283,6 +285,7 @@ from gateway.services.mcp_client import MCPClientPool
 from gateway.services.mcp_loop import (
     DEFAULT_MAX_TOOL_ITERATIONS,
     MAX_TOOL_ITERATIONS_CAP,
+    AnsweredRounds,
     MaxToolIterationsExceeded,
     RoundGate,
     ToolBackend,
@@ -291,6 +294,7 @@ from gateway.services.mcp_stateless import failure_class
 from gateway.services.model_access import (
     McpAccess,
     key_model_refusal,
+    misspelled_model_refusal,
     model_not_allowed_detail,
     organization_key_refusal,
     owned_endpoint_refusal,
@@ -393,12 +397,17 @@ from gateway.services.tools import (
     WEB_FETCH_TOOL_NAME,
     WEB_SEARCH_TOOL_NAME,
     AdmittedCodeExecution,
+    AdmittedMcpServers,
     AdmittedWebTools,
     CandidateTools,
     CombinedToolBackend,
     DeclaredCodeExecution,
     DeclaredWebTools,
     Dialect,
+    McpConnectionService,
+    McpSignInBackend,
+    McpSignInNeeded,
+    McpSignInReason,
     PricedTool,
     ProviderToolDeclaration,
     ToolUseBudget,
@@ -417,6 +426,7 @@ from gateway.services.tools import (
     declares_code_execution,
     declares_provider_mcp,
     extract_web_tools,
+    mcp_server_contacts,
     native_rendering,
     read_web_declarations,
     read_web_fetch_max_uses,
@@ -546,6 +556,21 @@ def _model_as_named(provider: Any, model: str, display_model: str | None) -> str
     if display_model is not None:
         return display_model
     return f"{provider_key(provider)}:{model}" if provider else model
+
+
+def answered_rounds_usage(adapter: FormatAdapter[Any, Any], exc: BaseException | None) -> CompletionUsage | None:
+    """What the rounds a failed tool loop had answered owe, or None when it failed before one was.
+
+    The provider billed those rounds, so the failure row bills them too, as a
+    stream that dies after reporting usage still owes for it.
+    """
+    answered = AnsweredRounds.of(exc)
+    if answered is None:
+        return None
+    if answered.result is not None:
+        return adapter.extract_usage(answered.result)
+    reported = (adapter.extract_stream_usage(event) for event in reversed(answered.events))
+    return next((usage for usage in reported if usage is not None), None)
 
 
 def with_provider_failure(error: HTTPException, exc: BaseException, provider: str | None) -> HTTPException:
@@ -807,13 +832,16 @@ class RequestContext:
         # What the ``rate_limits`` rules hold for this request, settled where its reservation is.
         self.rate_limit_grant = rate_limit_grant
         self.reservation = reservation
-        # USD already written onto a failure row for gateway-run tool calls. A
-        # request whose plan is exhausted still owes for the searches it ran, and
+        # USD already written onto a failure row: the gateway-run tool calls and the
+        # tool-loop rounds a provider answered. A request whose plan is
+        # exhausted still owes for the searches and rounds it ran, and
         # ``log_exhausted_plan`` writes that onto the row without settling. Recording
         # it here lets the single release site reconcile it instead of refunding,
         # which is what keeps ``users.spend`` matching the row: ``refund_reservation``
         # releases the hold *without* writing spend.
         self.tool_charge: Decimal = Decimal(0)
+        # Those rounds' tokens, for the token ceiling and the per-minute token limit.
+        self.tool_charge_tokens = 0
         # USD the reservation grew by to hold gateway-run tool calls before they ran.
         # A fallover's top-up holds it on top of the next candidate's estimate, since
         # those calls are billed whichever attempt wins.
@@ -1062,7 +1090,7 @@ async def resolve_dispatch_provider(
     """
     if ctx.resolved_provider is not None:
         return await _prepare_for_dispatch(
-            ctx, ctx.resolved_provider, adapter=adapter, port=model_provider, billing=billing
+            ctx, ctx.resolved_provider, model_selector, adapter=adapter, port=model_provider, billing=billing
         )
     try:
         resolved = resolve_provider_selector(
@@ -1087,12 +1115,15 @@ async def resolve_dispatch_provider(
             safety_identifier=ctx.upstream_user,
         )
         _raise_for_unresolvable_model(model_selector, exc)
-    return await _prepare_for_dispatch(ctx, resolved, adapter=adapter, port=model_provider, billing=billing)
+    return await _prepare_for_dispatch(
+        ctx, resolved, model_selector, adapter=adapter, port=model_provider, billing=billing
+    )
 
 
 async def _prepare_for_dispatch(
     ctx: RequestContext,
     resolved: ResolvedProvider,
+    model_selector: str,
     *,
     adapter: FormatAdapter[Any, Any],
     port: ModelProviderPort,
@@ -1106,7 +1137,7 @@ async def _prepare_for_dispatch(
         # and follows no redirect; see ``services/providers``.
         client_args = {"http_client": owned_endpoint_sdk_client(resolved.provider)}
         return replace(resolved, kwargs={**resolved.kwargs, "client_args": client_args})
-    served = await _serve_from_hosted_credential(ctx, resolved, adapter=adapter, port=port)
+    served = await _serve_from_hosted_credential(ctx, resolved, model_selector, adapter=adapter, port=port)
     ctx.deployment_paid = served.deployment_paid
     if served.deployment_paid:
         await _hold_at_deployment_paid_rate(ctx, served, adapter=adapter)
@@ -1162,6 +1193,54 @@ async def _refuse_if_hosted_model_switched_off(
         detail,
         ErrorKind.API,
         headers=error_headers(PROVIDER_NOT_CONFIGURED),
+    )
+
+
+async def _refuse_if_model_unknown(
+    ctx: RequestContext, resolved: ResolvedProvider, model_selector: str, *, adapter: FormatAdapter[Any, Any]
+) -> None:
+    """Refuse a model of a vendor in the caller's catalog that neither the catalog nor models.dev knows.
+
+    That is most often a misspelled catalog id (``openai/gpt-oss-12``), which
+    would otherwise be told its provider is not configured. The refusal names
+    the nearest catalog ids. A known model keeps the provider's own answer, as
+    do an alias, whose target stays hidden, and a prefix the catalog has
+    nothing under, such as an undeclared local provider. Called after
+    :func:`_refuse_if_hosted_model_switched_off`, so a hosted provider's own
+    roster keeps answering for its models.
+    """
+    if resolved.alias is not None:
+        return
+    refusal = misspelled_model_refusal(
+        ctx.organization_id,
+        instance=resolved.instance,
+        provider=resolved.provider.value,
+        model=resolved.model,
+        selector=model_selector,
+    )
+    if refusal is None:
+        return
+    await release_reservation(ctx)
+    await log_gateway_rejection(
+        db=ctx.db,
+        log_writer=ctx.log_writer,
+        api_key_id=ctx.api_key_id,
+        user_id=ctx.user_id,
+        model=resolved.model,
+        provider=resolved.instance,
+        endpoint=adapter.endpoint,
+        detail=refusal.detail,
+        status_code=refusal.status_code,
+        started_at=ctx.started_at,
+        request_id=ctx.request_id,
+        tags=ctx.tags,
+        safety_identifier=ctx.upstream_user,
+    )
+    raise adapter.error(
+        refusal.status_code,
+        refusal.detail,
+        ErrorKind.from_status(refusal.status_code),
+        headers=error_headers(refusal.code),
     )
 
 
@@ -1238,7 +1317,8 @@ async def _admit_or_refuse(
         await _record_funding_refusal(
             ctx, resolved, adapter=adapter, detail=detail, status_code=status.HTTP_402_PAYMENT_REQUIRED
         )
-        raise adapter.error(402, detail, ErrorKind.INVALID_REQUEST, headers=error_headers(INSUFFICIENT_FUNDS)) from exc
+        headers = error_headers(INSUFFICIENT_FUNDS, billing_url=exc.action_url)
+        raise adapter.error(402, detail, ErrorKind.INVALID_REQUEST, headers=headers) from exc
     except Exception as exc:
         # As for a ModelProviderPort failure: a funding check is expected to read
         # a database or a service, and nothing above this catches what it raises.
@@ -1515,7 +1595,7 @@ def _hosted_candidate(
                 HTTPException(
                     status_code=status.HTTP_402_PAYMENT_REQUIRED,
                     detail=exc.public_message,
-                    headers=error_headers(INSUFFICIENT_FUNDS),
+                    headers=error_headers(INSUFFICIENT_FUNDS, billing_url=exc.action_url),
                 )
             ) from exc
         except Exception as exc:
@@ -1550,6 +1630,7 @@ def _hosted_candidate(
 async def _serve_from_hosted_credential(
     ctx: RequestContext,
     resolved: ResolvedProvider,
+    model_selector: str,
     *,
     adapter: FormatAdapter[Any, Any],
     port: ModelProviderPort,
@@ -1681,6 +1762,7 @@ async def _serve_from_hosted_credential(
 
     if credential is None and not lookup.own_name_only:
         await _refuse_if_hosted_model_switched_off(ctx, resolved, adapter=adapter, port=port)
+        await _refuse_if_model_unknown(ctx, resolved, model_selector, adapter=adapter)
     if credential is None or not lookup.accepts(credential.response_provider, resolved.instance):
         raise await _provider_not_configured(ctx, resolved, missing, adapter=adapter)
     try:
@@ -3297,6 +3379,7 @@ class ToolContext:
         self,
         *,
         mcp_server_configs: list[McpServerConfig] | None,
+        mcp_sign_in: Sequence[McpSignInNeeded] = (),
         use_sandbox: bool,
         sandbox_tool_entry: dict[str, Any] | None,
         code_execution_port: CodeExecutionPort | None,
@@ -3322,6 +3405,8 @@ class ToolContext:
         # through; None where the request runs none.
         self.guardrails = guardrails
         self.mcp_server_configs = mcp_server_configs
+        # The per-user servers the loop offers a sign-in link for instead of opening.
+        self.mcp_sign_in = tuple(mcp_sign_in)
         self.use_sandbox = use_sandbox
         # The uploads a sandbox session is seeded with, and the store the outputs
         # of Otari's or a provider's sandbox land in. None when files are disabled.
@@ -3529,16 +3614,22 @@ class ToolContext:
 
     @property
     def use_tool_loop(self) -> bool:
-        return bool(self.mcp_server_configs) or self.use_sandbox or self.use_web_search or self.use_web_fetch
+        return (
+            bool(self.mcp_server_configs)
+            or bool(self.mcp_sign_in)
+            or self.use_sandbox
+            or self.use_web_search
+            or self.use_web_fetch
+        )
 
     def build_web_backends(self) -> Sequence[WebSearchBackend | WebFetchBackend | WebRetrievalBackend]:
-        """Build the request's web tool backends: on the libraries where its search runs on one, else the old backend.
+        """Build the request's web tool backends: on the libraries, else the old backend for a search.
 
-        On the libraries, the search and fetch backends are two members of the
-        request's pool, sharing its call allowance. A request that declared only
-        the fetch tool keeps the old backend, which delegates its fetches.
+        The search and fetch backends are members of the request's pool, sharing
+        its call allowance. A request that declared only the fetch tool gets the
+        fetch backend alone, on the instance its admission resolved.
         """
-        if self.web.in_loop_search is None:
+        if self.web.on_old_backend:
             return [self.build_web_retrieval_backend()]
         search_tool_entry = self.web_search_tool_entry or {}
         return build_web_search_backends(
@@ -3845,7 +3936,7 @@ async def prepare_gateway_tools(
     try:
         web_candidates = await _admit_web_declarations(adapter, ctx, declared, web_policy)
         guardrails = await _admit_guardrails(adapter, ctx, response, declared)
-        mcp_servers = await _admit_mcp_servers(adapter, ctx, declared, backends.ports.mcp_server)
+        mcp = await _admit_mcp_servers(adapter, ctx, declared, backends.ports.mcp_server)
         code = await _declare_code_execution(adapter, ctx, declared, backends)
         candidates = _combined(web_candidates, _decide_for_candidates(adapter, ctx, [code.provider_declaration()]))
         answers = await _admit_candidates(adapter, ctx, code, candidates, web_policy=web_policy)
@@ -3868,8 +3959,14 @@ async def prepare_gateway_tools(
     except DATABASE_ERRORS:
         # A database failure is not an HTTPException, so the reservation is released here too.
         # The rollback comes first, because a failed statement leaves the session unusable for the release.
+        await ctx.uow.abandon()
         with contextlib.suppress(*DATABASE_ERRORS):
-            await ctx.db.rollback()
+            await release_reservation(ctx)
+        raise
+    except asyncio.CancelledError:
+        # The client disconnected during an admission step's I/O. Released as a database failure is,
+        # rolling back first, because an interrupted statement leaves the session unusable.
+        await ctx.uow.abandon()
         with contextlib.suppress(*DATABASE_ERRORS):
             await release_reservation(ctx)
         raise
@@ -3897,7 +3994,8 @@ async def prepare_gateway_tools(
         code, web, web_access = answer.code, answer.web, answer.web_access
         return ToolContext(
             config=ctx.config,
-            mcp_server_configs=mcp_servers,
+            mcp_server_configs=mcp.servers,
+            mcp_sign_in=mcp.sign_in,
             use_sandbox=code.use_sandbox,
             sandbox_tool_entry=code.tool_entry,
             code_execution_port=backends.ports.code_execution,
@@ -4188,9 +4286,8 @@ async def _admit_tool_funding(
                 list(dict.fromkeys(tool.type for tool in paid)), refusal.public_message, declared=True
             )
             last_refusal = (gateway_tool_pricing_key(paid[0].name), refusal, detail)
-            unfunded[claimed] = _ToolRefusal(
-                adapter.error(402, detail, ErrorKind.INVALID_REQUEST, headers=error_headers(INSUFFICIENT_FUNDS))
-            )
+            headers = error_headers(INSUFFICIENT_FUNDS, billing_url=refusal.action_url)
+            unfunded[claimed] = _ToolRefusal(adapter.error(402, detail, ErrorKind.INVALID_REQUEST, headers=headers))
     if last_refusal is not None and len(unfunded) == len(admitted):
         tool_key, refused, detail = last_refusal
         logger.info(
@@ -4200,7 +4297,10 @@ async def _admit_tool_funding(
         )
         await _refuse_tool_funding(ctx, adapter, tool_key, detail, status.HTTP_402_PAYMENT_REQUIRED)
         raise adapter.error(
-            402, detail, ErrorKind.INVALID_REQUEST, headers=error_headers(INSUFFICIENT_FUNDS)
+            402,
+            detail,
+            ErrorKind.INVALID_REQUEST,
+            headers=error_headers(INSUFFICIENT_FUNDS, billing_url=refused.action_url),
         ) from refused
     # The commit also lands any credit admission granted, so a request whose
     # admission did not commit is not served on it, as at the model's gate.
@@ -4342,16 +4442,26 @@ async def _admit_guardrails(
 
 async def _admit_mcp_servers(
     adapter: FormatAdapter[Any, Any], ctx: RequestContext, declared: DeclaredTools, servers: WorkspaceMcpServers
-) -> list[McpServerConfig] | None:
-    """The MCP servers the request may reach: its own, then the stored ones its IDs name."""
+) -> AdmittedMcpServers:
+    """The MCP servers the request may reach: its own, the stored ones its IDs name, and its workspace's attached ones.
+
+    Only a request made with an API key that may call MCP tools gets the attached servers. The Playground
+    names the servers it uses, and a master key belongs to no workspace.
+    """
     provider_mcp = declares_provider_mcp(declared.tools)
     declares_mcp = _declares_mcp(declared)
     try:
+        attach = (
+            ctx.api_key is not None
+            and not ctx.session
+            and KeyScope.MCP_EXECUTE in ctx.api_key.scopes
+            and await servers.any_attached(ctx.workspace_id)
+        )
         access = (
             await resolve_request_mcp_access(
                 ctx.db, ctx.api_key, ctx.workspace_id, session_user_id=ctx.user_id if ctx.session else None
             )
-            if declares_mcp
+            if declares_mcp or attach
             else McpAccess()
         )
         return await admit_mcp_servers(
@@ -4361,12 +4471,16 @@ async def _admit_mcp_servers(
             workspace_id=ctx.workspace_id,
             access=access,
             provider_mcp=provider_mcp,
+            attach=attach,
         )
-    except (McpServerDeclarationError, WorkspaceMcpServerNotFoundError) as exc:
+    except (
+        McpServerDeclarationError,
+        WorkspaceMcpServerNotFoundError,
+        McpSignInRequiredError,
+        McpServerConfigurationError,
+        McpConnectionUnavailableError,
+    ) as exc:
         raise domain_error(adapter, exc) from exc
-    except McpServerConfigurationError as exc:
-        # Not `domain_error`, which would hide a 5xx's fixed message behind a generic one.
-        raise adapter.error(exc.status_code, exc.message, ErrorKind.API) from exc
 
 
 async def _web_declarations(
@@ -5259,18 +5373,18 @@ async def release_reservation(ctx: RequestContext) -> None:
     it, which is the only thing that ever gives it back (the budget reset zeroes
     spend and leaves the hold in place).
 
-    When ``ctx.tool_charge`` is set, the request already ran gateway-run tool calls
-    that were written onto its failure row, so the reservation is *reconciled* to
-    that amount rather than refunded: a refund releases the hold without recording
-    spend, which would leave the charge visible in the activity log and missing from
-    the budget it should have consumed.
+    When ``ctx.tool_charge`` is set, its failure row already carries what the request
+    ran (gateway-run tool calls, tool-loop rounds a provider answered), so the
+    reservation is *reconciled* to that amount rather than refunded: a refund releases
+    the hold without recording spend, which would leave the charge visible in the
+    activity log and missing from the budget it should have consumed.
     """
     if ctx.rate_limit_grant is not None:
-        await ctx.rate_limit_grant.settle(0)
+        await ctx.rate_limit_grant.settle(ctx.tool_charge_tokens)
     if ctx.reservation is None:
         return
-    if ctx.tool_charge:
-        await reconcile_reservation(ctx.db, ctx.reservation, ctx.tool_charge)
+    if ctx.tool_charge or ctx.tool_charge_tokens:
+        await reconcile_reservation(ctx.db, ctx.reservation, ctx.tool_charge, actual_tokens=ctx.tool_charge_tokens)
         return
     await refund_reservation(ctx.db, ctx.reservation)
 
@@ -5406,6 +5520,7 @@ async def _log_failure_and_refund(
     status_code: int | None = None,
     attribution: RoutingAttribution | None = None,
     tool_tally: ToolUsageTally | None = None,
+    usage: CompletionUsage | None = None,
 ) -> None:
     """Record a request-level failure and release its reservation.
 
@@ -5417,10 +5532,11 @@ async def _log_failure_and_refund(
     When gateway-run tool calls happened before the failure, their cost is
     reconciled rather than refunded: ``refund_reservation`` releases the hold
     *without* writing spend, which would leave the cost visible on the row and
-    absent from ``users.spend``.
+    absent from ``users.spend``. ``usage`` is settled the same way: the tokens
+    of the tool-loop rounds the provider answered before the failure.
     """
     if ctx.rate_limit_grant is not None:
-        await ctx.rate_limit_grant.settle(0)
+        await ctx.rate_limit_grant.settle(_settled_tokens(usage))
     logged = await record_usage(
         request_facts=ctx.price_facts,
         db=ctx.db,
@@ -5430,6 +5546,7 @@ async def _log_failure_and_refund(
         provider=provider,
         endpoint=adapter.endpoint,
         user_id=ctx.user_id,
+        usage_override=usage,
         error=error,
         status_code=status_code,
         latency_ms=_elapsed_ms(ctx.started_at),
@@ -5441,6 +5558,7 @@ async def _log_failure_and_refund(
         tags=ctx.tags,
         source_label=ctx.source_label,
         safety_identifier=ctx.upstream_user,
+        prices=ctx.prices,
         deployment_paid=ctx.deployment_charge is not None,
         residency_audit=_residency_audit(ctx.residency, ctx.residency_source, ctx.sovereignty_map, provider, model),
     )
@@ -5456,7 +5574,10 @@ async def _log_failure_and_refund(
                 expects_cost=False,
                 tool_funding=ctx.tool_funding,
             )
-            await reconcile_reservation(ctx.db, ctx.reservation, cost)
+            await reconcile_reservation(ctx.db, ctx.reservation, cost, actual_tokens=_settled_tokens(usage))
+        elif tokens := _settled_tokens(usage):
+            # A free model's answered rounds still count against a token ceiling, as a stream's do.
+            await reconcile_reservation(ctx.db, ctx.reservation, Decimal(0), actual_tokens=tokens)
         else:
             await refund_reservation(ctx.db, ctx.reservation)
 
@@ -5551,14 +5672,18 @@ async def _open_tool_backends(
     """
     mcp: MCPClientPool | None = None
     if tool_ctx.mcp_server_configs:
-        mcp = await stack.enter_async_context(
-            MCPClientPool(
-                tool_ctx.mcp_server_configs,
-                tally=tool_ctx.tally,
-                trace=tool_ctx.trace,
-                ceded_tool_names=tool_ctx.reserved_tool_names | _declared_tool_names(tool_ctx.remaining_user_tools),
+        try:
+            mcp = await stack.enter_async_context(
+                MCPClientPool(
+                    tool_ctx.mcp_server_configs,
+                    tally=tool_ctx.tally,
+                    trace=tool_ctx.trace,
+                    ceded_tool_names=tool_ctx.reserved_tool_names | _declared_tool_names(tool_ctx.remaining_user_tools),
+                    contacts=mcp_server_contacts,
+                )
             )
-        )
+        except McpConnectionUnavailableError as exc:
+            raise domain_error(adapter, exc) from exc
         try:
             refuse_shadowed_builtin_tools(mcp, tool_ctx.reserved_tool_names)
         except McpServerDeclarationError as exc:
@@ -5572,6 +5697,29 @@ async def _open_tool_backends(
         backends.append(sandbox)
     if mcp is not None:
         backends.append(mcp)
+    # A server that refused the user's token at connect time, whose sign-in is over, gets a stand-in too.
+    signed_out = [
+        McpSignInNeeded(
+            server_id=exc.mcp_server_id,
+            name=cfg.name,
+            purpose_hint=cfg.purpose_hint,
+            user_id=exc.user_id,
+            reason=McpSignInReason.NOT_SIGNED_IN,
+        )
+        for cfg, exc in (mcp.signed_out if mcp is not None else [])
+    ]
+    if tool_ctx.mcp_sign_in or signed_out:
+        taken = {tool["function"]["name"] for backend in backends for tool in backend.openai_tools}
+        backends.append(
+            McpSignInBackend(
+                [*tool_ctx.mcp_sign_in, *signed_out],
+                mint=lambda server_id, user_id: McpConnectionService.sign_in_link(
+                    tool_ctx.config, server_id=server_id, user_id=user_id
+                ),
+                link_prefix=McpConnectionService.sign_in_link_prefix(tool_ctx.config),
+                taken=taken | tool_ctx.reserved_tool_names | _declared_tool_names(tool_ctx.remaining_user_tools),
+            )
+        )
     if (guardrails := tool_ctx.guardrails) is not None and guardrails.guards_tools:
         backends = [screened_backend(backend, guardrails) for backend in backends]
     return _OpenedTools(pool=backends[0] if len(backends) == 1 else CombinedToolBackend(backends), sandbox=sandbox)
@@ -5663,7 +5811,7 @@ class _ToolBackendKind(StrEnum):
         declared = [
             kind
             for kind, used in (
-                (cls.MCP, bool(tool_ctx.mcp_server_configs)),
+                (cls.MCP, bool(tool_ctx.mcp_server_configs) or bool(tool_ctx.mcp_sign_in)),
                 (cls.SANDBOX, tool_ctx.use_sandbox),
                 (cls.WEB_RETRIEVAL, tool_ctx.use_web_search or tool_ctx.use_web_fetch),
             )
@@ -6165,18 +6313,29 @@ def build_streaming_response(
         provider_cut = (
             first_chunk_at is not None and not isinstance(exc, _GATEWAY_SIDE_FAILURES) and is_provider_cut(exc)
         )
+        # A tool loop's hidden rounds never reach the client's stream, so their usage
+        # rides on the failure instead; the provider billed them all the same. What the
+        # stream did report (an Anthropic round's message_start) only fills in around it.
+        answered = answered_rounds_usage(adapter, exc)
+        reported = (
+            reported_usage
+            if answered is None
+            else answered
+            if reported_usage is None
+            else merge_stream_usage(reported_usage, answered)
+        )
         cut = (
             settle_cut_stream(
                 policy=config.stream_missing_usage_policy,
                 prompt_chars=prompt_chars,
                 streamed_chars=streamed_chars,
-                reported_usage=reported_usage,
-                usage_is_final=usage_is_final,
+                reported_usage=reported,
+                usage_is_final=usage_is_final and answered is None,
             )
             if provider_cut
             else None
         )
-        billed_usage = cut if cut is not None else reported_usage
+        billed_usage = cut if cut is not None else reported
         if isinstance(exc, AnswerRefused) and exc.usage is not None:
             # The provider answered in full and a guardrail refused it; the answer is owed.
             billed_usage = exc.usage
@@ -6677,6 +6836,7 @@ async def run_single_attempt_stream(
             failure.logged_status,
             attribution=_failure_attribution(ctx),
             tool_tally=tool_ctx.tally,
+            usage=answered_rounds_usage(adapter, exc),
         )
         # codeql[py/clear-text-logging-sensitive-data]
         logger.error("Stream creation failed for %s:%s: %s", provider, model, exc)
@@ -6821,7 +6981,8 @@ async def log_exhausted_plan(
     caller's existing single refund site stays the only one.
 
     ``tool_tally`` is what makes an exhausted plan still owe for the searches it
-    ran, including the case that cannot fail over at all: once a tool loop has
+    ran, as the tool-loop rounds the provider answered owe their tokens, including
+    in the case that cannot fail over at all: once a tool loop has
     produced an assistant message the plan locks to that provider (see
     ``_attempts``), so a failure inside the loop is terminal and this is the only
     row the request gets. The charge is recorded on ``ctx`` for the caller's single
@@ -6838,6 +6999,9 @@ async def log_exhausted_plan(
             model=stopped_on.model,
             uses_deployment_credential=stopped_on.deployment_paid,
         )
+    answered = answered_rounds_usage(adapter, exc.__cause__)
+    # Rounds the locked candidate answered ran on its account, so they are funded as a served request is.
+    funded = ctx.deployment_charge if answered is not None else None
     logged = await record_usage(
         request_facts=ctx.price_facts,
         db=ctx.db,
@@ -6847,6 +7011,7 @@ async def log_exhausted_plan(
         provider=last.instance,
         endpoint=adapter.endpoint,
         user_id=ctx.user_id,
+        usage_override=answered,
         error=str(exc.detail),
         status_code=exc.status_code,
         latency_ms=_elapsed_ms(ctx.started_at),
@@ -6860,11 +7025,14 @@ async def log_exhausted_plan(
         residency_audit=_residency_audit(
             ctx.residency, ctx.residency_source, ctx.sovereignty_map, last.instance, last.model
         ),
+        prices=ctx.prices,
+        deployment_paid=funded is not None,
     )
     ctx.tool_charge = logged.cost or Decimal(0)
+    ctx.tool_charge_tokens = _settled_tokens(answered)
     if ctx.reservation is not None:
         await charge_deployment_paid(
-            None,
+            funded,
             ctx.db,
             logged.deployment_paid_cost,
             tools=logged.deployment_paid_tools,
@@ -7208,6 +7376,7 @@ async def run_non_stream(
             status.HTTP_422_UNPROCESSABLE_CONTENT,
             attribution=_failure_attribution(ctx),
             tool_tally=tool_ctx.tally,
+            usage=answered_rounds_usage(adapter, e),
         )
         raise adapter.error(422, str(e), ErrorKind.INVALID_REQUEST) from e
     except SandboxNotReachableError as e:
@@ -7239,6 +7408,7 @@ async def run_non_stream(
             failure.logged_status,
             attribution=_failure_attribution(ctx),
             tool_tally=tool_ctx.tally,
+            usage=answered_rounds_usage(adapter, e),
         )
         # codeql[py/clear-text-logging-sensitive-data]
         logger.error("Provider call failed for %s:%s: %s", provider, model, e)

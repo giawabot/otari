@@ -25,8 +25,8 @@ routing:
 ```
 
 Callers send `model: fast`. If the first provider fails before any response is
-sent, Otari tries the fallback. The response keeps the policy name; the Overview's Requests
-and Usage tabs record the models that were attempted.
+sent, Otari tries the fallback. The response keeps the policy name; the Requests
+view of Sessions records the models that were attempted.
 
 ![Otari tries OpenAI first and moves to Anthropic when OpenAI returns a retryable error.](assets/routing-fallback-flow.webp)
 
@@ -49,7 +49,10 @@ A candidate nothing declares that one of the deployment's hosted providers
 serves is sent on the deployment's own credential, as a single model is
 ([hosted providers](hosted-providers.md#deployment-paid-credentials)). On
 otari.ai, such an entry is billed to the organization's balance at the same rate
-as a direct request, and is skipped when the balance cannot cover it.
+as a direct request, and is skipped when the balance cannot cover it. When the
+balance covers no candidate, the request is refused once with
+`402 insufficient_funds`, recorded against the plan's first model. A provider's
+own `402` is a provider failure like any other, and the plan moves on.
 
 When no candidate is left:
 
@@ -162,7 +165,7 @@ routing:
         - mistral:mistral-small
 ```
 
-- A full candidate is skipped without being called. The Overview's Requests tab
+- A full candidate is skipped without being called. The Requests view of Sessions
   shows it in the request's routing plan as skipped, naming the limit that was
   full, and Prometheus counts it in `gateway_rate_limit_model_full{rule, model}`.
 - The limit lives on the model, not on the policy, so the model is skipped the
@@ -323,8 +326,10 @@ request schemas.
 
 - A plan may contain at most five candidates, including router pools and
   `on_failure`.
-- Targets must be concrete provider or instance selectors. Policies and aliases
-  cannot chain.
+- Targets must be concrete provider or instance selectors, or name one of the
+  workspace's [provider keys by its request prefix](model-providers.md#add-a-key-for-your-own-endpoint),
+  so a policy can fall over between two keys on the same endpoint. Policies and
+  aliases cannot chain.
 - Policy names cannot contain `:` or `/` or collide with an alias or provider
   instance.
 - `routing.enabled: false` disables policy resolution but still validates the

@@ -4,6 +4,85 @@ All notable changes to Otari will be documented in this file.
 
 The format follows [Conventional Commits](https://www.conventionalcommits.org/).
 
+## [0.51.0](https://github.com/mozilla-ai/otari/releases/tag/v0.51.0) - 2026-11-18
+
+
+
+### Features
+
+- **web:** Reorganize the dashboard around Home, Sessions, People and Rules in [#3375](https://github.com/mozilla-ai/otari/pull/3375) by [@jigjigjig](https://github.com/jigjigjig) ([`a4455ab`](https://github.com/mozilla-ai/otari/commit/a4455abdfb3448a5c9914c07238a5a152c1950a4))
+
+
+**Full Changelog**: https://github.com/mozilla-ai/otari/compare/v0.50.0...v0.51.0
+## [0.50.0](https://github.com/mozilla-ai/otari/releases/tag/v0.50.0) - 2026-11-18
+
+
+
+### Bug Fixes
+
+- **mcp:** Make sign-in links single-use in [#3356](https://github.com/mozilla-ai/otari/pull/3356) by [@KevinGallaccio](https://github.com/KevinGallaccio) ([`159c1b1`](https://github.com/mozilla-ai/otari/commit/159c1b14f5add3d780eb819a264e79560b137a3d))
+- **oauth-apps:** Name public_base_url's origin as the issuer behind a proxy by [@daavoo](https://github.com/daavoo) ([`f464620`](https://github.com/mozilla-ai/otari/commit/f46462070c9f122e51264b6e5f86c64887cb2bbb))
+
+
+### Features
+
+- **web:** Fold the less common key scopes under Advanced scopes in [#3358](https://github.com/mozilla-ai/otari/pull/3358) by [@hasangzl](https://github.com/hasangzl) ([`12be23b`](https://github.com/mozilla-ai/otari/commit/12be23b15a2bfc233d98ec5ab4718a249078e2a2))
+- **architecture:** Cap the imports that reach below a non-domain service package by [@peteski22](https://github.com/peteski22) ([`1cac7cd`](https://github.com/mozilla-ai/otari/commit/1cac7cdde5101ee78db46ef107a81db94611d32c))
+- **traces:** Group opencode requests into sessions by its own header in [#3345](https://github.com/mozilla-ai/otari/pull/3345) by [@omelhus](https://github.com/omelhus) ([`df6676c`](https://github.com/mozilla-ai/otari/commit/df6676c34d1969379155a7ea5cc5dd8150a1d24d))
+- **onboarding:** Carry the first-run sheet into its payoff with a wave in [#3368](https://github.com/mozilla-ai/otari/pull/3368) by [@jigjigjig](https://github.com/jigjigjig) ([`535e7fe`](https://github.com/mozilla-ai/otari/commit/535e7feba4afcfe0682f3d682f1fcb2c5d5d209e))
+- **traces:** Group more agent harnesses' requests into sessions by their own headers in [#3370](https://github.com/mozilla-ai/otari/pull/3370) by [@tbille](https://github.com/tbille) ([`62271af`](https://github.com/mozilla-ai/otari/commit/62271af696017c0a4171e32d3d0e6a275c99f85f))
+- **web:** Show each recognized harness's logo on its session in [#3371](https://github.com/mozilla-ai/otari/pull/3371) by [@tbille](https://github.com/tbille) ([`5747c52`](https://github.com/mozilla-ai/otari/commit/5747c524bcbabfac2a33f8a1e939633b0673b391))
+- **hosted-providers:** A page per provider, with models grouped by vendor, a vendor switch and a price resync in [#3367](https://github.com/mozilla-ai/otari/pull/3367) by [@tbille](https://github.com/tbille) ([`16bc561`](https://github.com/mozilla-ai/otari/commit/16bc56141c935b1867980c37c6ee1f5855990d4c))
+- **onboarding:** Offer the setup key already issued when the guide is reopened in [#3373](https://github.com/mozilla-ai/otari/pull/3373) by [@tbille](https://github.com/tbille) ([`34f60d6`](https://github.com/mozilla-ai/otari/commit/34f60d66bbf9701693d931e1fbf5d297ada52221))
+- **web:** Give every dashboard page its own path instead of a /#/ address in [#3372](https://github.com/mozilla-ai/otari/pull/3372) by [@tbille](https://github.com/tbille) ([`3289c5a`](https://github.com/mozilla-ai/otari/commit/3289c5ab6192061f420be258c7f1779a3e1e6f10))
+- **traces:** Recognize more agent harnesses and draw their logos in [#3380](https://github.com/mozilla-ai/otari/pull/3380) by [@tbille](https://github.com/tbille) ([`31765e3`](https://github.com/mozilla-ai/otari/commit/31765e3bf4aa3e672df88a9f6b8840d5e3b9cb6b))
+
+
+
+### New Contributors
+
+- [@omelhus](https://github.com/omelhus) made their first contribution in [#3345](https://github.com/mozilla-ai/otari/pull/3345)
+
+**Full Changelog**: https://github.com/mozilla-ai/otari/compare/v0.49.0...v0.50.0
+## [0.49.0](https://github.com/mozilla-ai/otari/releases/tag/v0.49.0) - 2026-11-17
+
+
+
+### Bug Fixes
+
+- **budgets:** Hold each tool-loop round's reported output before the next round in [#3318](https://github.com/mozilla-ai/otari/pull/3318) by [@daavoo](https://github.com/daavoo) ([`31a7d88`](https://github.com/mozilla-ai/otari/commit/31a7d888d892b03ccbfcda24adb3ef7e00ce776d))
+- **billing:** Price a tool whose name is past the meter cap under its full name by [@BruceWayne733](https://github.com/BruceWayne733) ([`83ce0a8`](https://github.com/mozilla-ai/otari/commit/83ce0a81e304d61bc11a9f7c6c20035fe2877d07))
+- **files:** Treat a malformed storage ref like any other store failure in [#3180](https://github.com/mozilla-ai/otari/pull/3180) by [@0xvikram](https://github.com/0xvikram) ([`50f8220`](https://github.com/mozilla-ai/otari/commit/50f822025ef97591682cc6acfc3a0e6795a57e75))
+- **health:** Log a database outage once, not on every readiness probe in [#3179](https://github.com/mozilla-ai/otari/pull/3179) by [@0xvikram](https://github.com/0xvikram) ([`f8c22be`](https://github.com/mozilla-ai/otari/commit/f8c22bed5570a17116b93947ab31d3422c3416e4))
+- **lifespan:** Keep a failing cache reset from aborting shutdown in [#3178](https://github.com/mozilla-ai/otari/pull/3178) by [@0xvikram](https://github.com/0xvikram) ([`81089fc`](https://github.com/mozilla-ai/otari/commit/81089fcde2e9794336d9836b1a6016a1f6b56743))
+- **batches:** Log per-result usage and redact item errors in [#3250](https://github.com/mozilla-ai/otari/pull/3250) by [@mikemikimike](https://github.com/mikemikimike) ([`511b4a4`](https://github.com/mozilla-ai/otari/commit/511b4a403eb60cd9653fc63e262b6361d5fd7efd))
+- **tools:** Refuse a gateway tool call whose arguments are not a JSON… in [#3177](https://github.com/mozilla-ai/otari/pull/3177) by [@0xvikram](https://github.com/0xvikram) ([`31c7959`](https://github.com/mozilla-ai/otari/commit/31c7959290e1e2d462121c3b0b553e90dd194a7b))
+- **api:** Restore the dependency names a second __all__ dropped in [#3331](https://github.com/mozilla-ai/otari/pull/3331) by [@peteski22](https://github.com/peteski22) ([`3741560`](https://github.com/mozilla-ai/otari/commit/3741560393a59db985f818eb096cf7837be2adf1))
+- **tools:** End the last tool round as the answer even when the model calls a tool in [#3313](https://github.com/mozilla-ai/otari/pull/3313) by [@daavoo](https://github.com/daavoo) ([`f55265c`](https://github.com/mozilla-ai/otari/commit/f55265c30e7d765285b35c62d0b4afca70162357))
+- **tools:** Run a request that declares only web fetch on the libraries in [#3334](https://github.com/mozilla-ai/otari/pull/3334) by [@aittalam](https://github.com/aittalam) ([`c7f2cb6`](https://github.com/mozilla-ai/otari/commit/c7f2cb670c044cdc9b084247244183d10c9c89c4))
+- **usage:** Leave the calling key's own user unlabeled on the key usage routes in [#3347](https://github.com/mozilla-ai/otari/pull/3347) by [@daavoo](https://github.com/daavoo) ([`386e762`](https://github.com/mozilla-ai/otari/commit/386e762e863e09315009c6df7cc1794ee8d7249a))
+- **routing:** Accept an organization key's request prefix as a policy or alias target in [#3343](https://github.com/mozilla-ai/otari/pull/3343) by [@daavoo](https://github.com/daavoo) ([`87d7877`](https://github.com/mozilla-ai/otari/commit/87d78770e4b86a38fed53df278e6a353a451fe7d))
+- **usage:** Bill the answered rounds of a tool loop that later fails in [#3235](https://github.com/mozilla-ai/otari/pull/3235) by [@hitakshiA](https://github.com/hitakshiA) ([`577e195`](https://github.com/mozilla-ai/otari/commit/577e195e7ed7d0b432eb8571cfa23333be2ed1eb))
+- **mcp:** Small follow-ups from the MCP governance review in [#3354](https://github.com/mozilla-ai/otari/pull/3354) by [@KevinGallaccio](https://github.com/KevinGallaccio) ([`e3de291`](https://github.com/mozilla-ai/otari/commit/e3de2913450683e2f899e7374596053884ba81bc))
+- **cli:** Read the config file path from OTARI_CONFIG_PATH in [#3351](https://github.com/mozilla-ai/otari/pull/3351) by [@daavoo](https://github.com/daavoo) ([`4a6e4a2`](https://github.com/mozilla-ai/otari/commit/4a6e4a2d002c6c7ecf3b77b8b0a4cf8c551df85e))
+
+
+### Features
+
+- **architecture:** Fail an import cycle the interpreter would refuse in [#3325](https://github.com/mozilla-ai/otari/pull/3325) by [@peteski22](https://github.com/peteski22) ([`83fba4d`](https://github.com/mozilla-ai/otari/commit/83fba4d4c1e8979757d5e88ec08060e4eb4091ef))
+- **architecture:** Refuse a class with behavior in the composition root in [#3340](https://github.com/mozilla-ai/otari/pull/3340) by [@peteski22](https://github.com/peteski22) ([`b516a7b`](https://github.com/mozilla-ai/otari/commit/b516a7bcad58a112f09646f3f11f7739fe4e6cb7))
+- **mcp:** Add the MCP server catalog in [#3267](https://github.com/mozilla-ai/otari/pull/3267) by [@KevinGallaccio](https://github.com/KevinGallaccio) ([`178ceea`](https://github.com/mozilla-ai/otari/commit/178ceeac2d7cdbd6526116c46d28c73deed42b95))
+- **mcp:** MCP server sign-in, health and member requests in [#3268](https://github.com/mozilla-ai/otari/pull/3268) by [@KevinGallaccio](https://github.com/KevinGallaccio) ([`115d7fe`](https://github.com/mozilla-ai/otari/commit/115d7fe5ff307a52ef5a07291e5804b55d25dc22))
+- **web:** MCP servers page with catalog, sign-in, requests in [#3269](https://github.com/mozilla-ai/otari/pull/3269) by [@KevinGallaccio](https://github.com/KevinGallaccio) ([`cb834df`](https://github.com/mozilla-ai/otari/commit/cb834df8c9a6445cf9227aba5604833e65595f56))
+- **identity:** Let a person delete their own account in [#3320](https://github.com/mozilla-ai/otari/pull/3320) by [@daavoo](https://github.com/daavoo) ([`d9a90f0`](https://github.com/mozilla-ai/otari/commit/d9a90f00ce62b699c5298d5ede5bd021657282dd))
+- Link refused requests to billing and name misspelled models in [#3326](https://github.com/mozilla-ai/otari/pull/3326) by [@tbille](https://github.com/tbille) ([`bf2363d`](https://github.com/mozilla-ai/otari/commit/bf2363dc7b673f43ef8f55afd36dad06cffc7441))
+- **mcp:** Say which keys can use a workspace's MCP servers in [#3352](https://github.com/mozilla-ai/otari/pull/3352) by [@KevinGallaccio](https://github.com/KevinGallaccio) ([`b1f5745`](https://github.com/mozilla-ai/otari/commit/b1f57459c44acb872ce9a4bebf315b0abe75e8b2))
+- **cors:** Let browser apps exchange OAuth app tokens and call web tools with their key in [#3359](https://github.com/mozilla-ai/otari/pull/3359) by [@daavoo](https://github.com/daavoo) ([`68aac2e`](https://github.com/mozilla-ai/otari/commit/68aac2e721e3c4dd29d3cae3e203075d78315f4d))
+- **admin:** Hand over the bootstrap operator role in [#3353](https://github.com/mozilla-ai/otari/pull/3353) by [@tbille](https://github.com/tbille) ([`6890b4d`](https://github.com/mozilla-ai/otari/commit/6890b4d96709d06d12d2dea66d0930ea57b69816))
+- Public Providers page with each provider's terms and privacy links in [#3357](https://github.com/mozilla-ai/otari/pull/3357) by [@tbille](https://github.com/tbille) ([`3725f96`](https://github.com/mozilla-ai/otari/commit/3725f96fbf75df78434f6cfe6b312792d5555312))
+
+
+**Full Changelog**: https://github.com/mozilla-ai/otari/compare/v0.48.0...v0.49.0
 ## [0.48.0](https://github.com/mozilla-ai/otari/releases/tag/v0.48.0) - 2026-11-16
 
 
