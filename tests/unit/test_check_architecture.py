@@ -2247,3 +2247,238 @@ def test_a_renamed_annotated_import_still_names_a_type(tmp_path: Path, monkeypat
     )
 
     assert check.check_model_access(tmp_path) == []
+
+
+_COMPOSITION_ROOT_MODULE = "gateway/api/deps/__init__.py"
+
+
+def _composition_root_behavior(line: int, name: str, methods: int, path: str = _COMPOSITION_ROOT_MODULE) -> str:
+    return (
+        f"{path}:{line} defines {name} with {methods} method(s); the composition root builds "
+        "things and holds no implementation, so this belongs to the domain whose work it does"
+    )
+
+
+def test_a_class_with_a_method_in_the_composition_root_is_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ())
+    _write(tmp_path, _COMPOSITION_ROOT_MODULE, "class Claim:\n    def claim(self) -> None: ...\n")
+    assert check.check_composition_root_behavior(tmp_path) == [_composition_root_behavior(1, "Claim", 1)]
+
+
+def test_a_class_with_no_methods_in_the_composition_root_is_clean(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ())
+    _write(tmp_path, _COMPOSITION_ROOT_MODULE, "class Ports:\n    search: object\n    files: object\n")
+    assert check.check_composition_root_behavior(tmp_path) == []
+
+
+def test_a_dataclass_of_data_in_the_composition_root_is_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ())
+    _write(
+        tmp_path,
+        _COMPOSITION_ROOT_MODULE,
+        "@dataclass(frozen=True, kw_only=True)\nclass Ports:\n    search: object\n",
+    )
+    assert check.check_composition_root_behavior(tmp_path) == []
+
+
+def test_a_dataclass_that_grows_a_method_is_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ())
+    _write(
+        tmp_path,
+        _COMPOSITION_ROOT_MODULE,
+        "@dataclass(frozen=True)\nclass Ports:\n    search: object\n\n    def pick(self) -> None: ...\n",
+    )
+    assert check.check_composition_root_behavior(tmp_path) == [_composition_root_behavior(2, "Ports", 1)]
+
+
+def test_a_class_nested_in_a_builder_is_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ())
+    _write(
+        tmp_path,
+        _COMPOSITION_ROOT_MODULE,
+        "def ledger_on(db: object) -> object:\n"
+        "    class Ledger:\n"
+        "        def rate(self) -> None: ...\n\n"
+        "        def spend(self) -> None: ...\n\n"
+        "    return Ledger()\n",
+    )
+    assert check.check_composition_root_behavior(tmp_path) == [_composition_root_behavior(2, "ledger_on.Ledger", 2)]
+
+
+def test_a_baselined_class_in_the_composition_root_is_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ((_COMPOSITION_ROOT_MODULE, "Claim"),))
+    _write(tmp_path, _COMPOSITION_ROOT_MODULE, "class Claim:\n    def claim(self) -> None: ...\n")
+    assert check.check_composition_root_behavior(tmp_path) == []
+
+
+def test_a_baselined_class_that_moved_out_fails_until_its_entry_goes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ((_COMPOSITION_ROOT_MODULE, "Claim"),))
+    _write(tmp_path, _COMPOSITION_ROOT_MODULE, "def get_claim() -> object:\n    return object()\n")
+    assert check.check_composition_root_behavior(tmp_path) == [
+        f"{_COMPOSITION_ROOT_MODULE} is on the composition root behavior baseline for Claim, "
+        "which no longer defines a method there; remove it from the baseline"
+    ]
+
+
+def test_a_class_with_a_method_outside_the_composition_root_is_not_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ())
+    _write(tmp_path, "gateway/services/tools/_claim.py", "class Claim:\n    def claim(self) -> None: ...\n")
+    assert check.check_composition_root_behavior(tmp_path) == []
+
+
+def test_a_method_under_a_conditional_in_a_class_body_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ())
+    _write(
+        tmp_path,
+        _COMPOSITION_ROOT_MODULE,
+        "class Claim:\n    if TYPE_CHECKING:\n        def claim(self) -> None: ...\n",
+    )
+    assert check.check_composition_root_behavior(tmp_path) == [_composition_root_behavior(1, "Claim", 1)]
+
+
+def test_a_class_under_a_conditional_in_a_builder_is_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ())
+    _write(
+        tmp_path,
+        _COMPOSITION_ROOT_MODULE,
+        "def ledger_on(db: object) -> object:\n"
+        "    if db is not None:\n"
+        "        class Ledger:\n"
+        "            def rate(self) -> None: ...\n\n"
+        "        return Ledger()\n"
+        "    return None\n",
+    )
+    assert check.check_composition_root_behavior(tmp_path) == [_composition_root_behavior(3, "ledger_on.Ledger", 1)]
+
+
+def test_a_class_under_an_exception_handler_is_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ())
+    _write(
+        tmp_path,
+        _COMPOSITION_ROOT_MODULE,
+        "try:\n    import fast\nexcept ImportError:\n    class Fallback:\n        def run(self) -> None: ...\n",
+    )
+    assert check.check_composition_root_behavior(tmp_path) == [_composition_root_behavior(4, "Fallback", 1)]
+
+
+def test_a_nested_class_does_not_count_toward_the_class_holding_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(check, "COMPOSITION_ROOT_BEHAVIOR_BASELINE", ())
+    _write(
+        tmp_path,
+        _COMPOSITION_ROOT_MODULE,
+        "class Outer:\n"
+        "    def mine(self) -> None: ...\n\n"
+        "    class Inner:\n"
+        "        def theirs(self) -> None: ...\n\n"
+        "        def also(self) -> None: ...\n",
+    )
+    assert check.check_composition_root_behavior(tmp_path) == [
+        _composition_root_behavior(1, "Outer", 1),
+        _composition_root_behavior(4, "Outer.Inner", 2),
+    ]
+
+
+_NON_DOMAIN_PACKAGE = "gateway/services/sidecar/__init__.py"
+_NON_DOMAIN_MEMBER = "gateway/services/sidecar/_impl.py"
+_OUTSIDE = "gateway/api/deps/things.py"
+
+
+def _sidecar(tmp_path: Path, *, outside_imports: int) -> None:
+    _write(tmp_path, _NON_DOMAIN_PACKAGE, "")
+    _write(tmp_path, _NON_DOMAIN_MEMBER, "VALUE = 1\n")
+    lines = "".join(f"from gateway.services.sidecar._impl import VALUE as V{n}\n" for n in range(outside_imports))
+    _write(tmp_path, _OUTSIDE, lines or "VALUE = 1\n")
+
+
+def test_a_non_domain_package_at_its_ceiling_is_clean(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "NON_DOMAIN_SERVICE_IMPORT_BASELINE", {"sidecar": 2})
+    _sidecar(tmp_path, outside_imports=2)
+    assert check.check_non_domain_service_imports(tmp_path, {"things"}) == []
+
+
+def test_a_count_above_the_ceiling_is_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "NON_DOMAIN_SERVICE_IMPORT_BASELINE", {"sidecar": 1})
+    _sidecar(tmp_path, outside_imports=3)
+    assert check.check_non_domain_service_imports(tmp_path, {"things"}) == [
+        "3 imports reach below services/sidecar/, above its ceiling of 1; import what services.sidecar "
+        "exports, or split the package into the domains DOMAINS.md names"
+    ]
+
+
+def test_a_count_below_the_ceiling_must_be_recorded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "NON_DOMAIN_SERVICE_IMPORT_BASELINE", {"sidecar": 5})
+    _sidecar(tmp_path, outside_imports=2)
+    assert check.check_non_domain_service_imports(tmp_path, {"things"}) == [
+        "only 2 imports now reach below services/sidecar/, under its ceiling of 5; "
+        "lower the ceiling to that, so the removal cannot be spent again"
+    ]
+
+
+def test_a_non_domain_package_with_no_ceiling_is_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "NON_DOMAIN_SERVICE_IMPORT_BASELINE", {})
+    _sidecar(tmp_path, outside_imports=2)
+    assert check.check_non_domain_service_imports(tmp_path, {"things"}) == [
+        "services/sidecar/ is not a domain DOMAINS.md gives a section and has no import ceiling; "
+        "give it one of 2, or give the package a section"
+    ]
+
+
+def test_a_package_that_became_a_domain_loses_its_ceiling(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "NON_DOMAIN_SERVICE_IMPORT_BASELINE", {"sidecar": 2})
+    _sidecar(tmp_path, outside_imports=2)
+    assert check.check_non_domain_service_imports(tmp_path, {"sidecar"}) == [
+        "services/sidecar/ has an import ceiling but is no longer a service package that is not a domain; "
+        "remove its ceiling"
+    ]
+
+
+def test_an_import_inside_the_package_does_not_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "NON_DOMAIN_SERVICE_IMPORT_BASELINE", {"sidecar": 0})
+    _sidecar(tmp_path, outside_imports=0)
+    _write(
+        tmp_path,
+        "gateway/services/sidecar/_other.py",
+        "from gateway.services.sidecar._impl import VALUE\n",
+    )
+    assert check.check_non_domain_service_imports(tmp_path, {"things"}) == []
+
+
+def test_an_import_of_the_package_root_does_not_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "NON_DOMAIN_SERVICE_IMPORT_BASELINE", {"sidecar": 0})
+    _sidecar(tmp_path, outside_imports=0)
+    _write(tmp_path, _OUTSIDE, "from gateway.services.sidecar import VALUE\n")
+    assert check.check_non_domain_service_imports(tmp_path, {"things"}) == []
+
+
+def test_a_plain_import_below_the_root_counts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "NON_DOMAIN_SERVICE_IMPORT_BASELINE", {"sidecar": 0})
+    _sidecar(tmp_path, outside_imports=0)
+    _write(tmp_path, _OUTSIDE, "import gateway.services.sidecar._impl as impl\n")
+    assert check.check_non_domain_service_imports(tmp_path, {"things"}) == [
+        "1 imports reach below services/sidecar/, above its ceiling of 0; import what services.sidecar "
+        "exports, or split the package into the domains DOMAINS.md names"
+    ]
+
+
+def test_a_plain_import_of_the_package_root_does_not_count(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "NON_DOMAIN_SERVICE_IMPORT_BASELINE", {"sidecar": 0})
+    _sidecar(tmp_path, outside_imports=0)
+    _write(tmp_path, _OUTSIDE, "import gateway.services.sidecar\n")
+    assert check.check_non_domain_service_imports(tmp_path, {"things"}) == []
+
+
+def test_one_statement_counts_once_however_many_names_it_binds(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(check, "NON_DOMAIN_SERVICE_IMPORT_BASELINE", {"sidecar": 1})
+    _sidecar(tmp_path, outside_imports=0)
+    _write(tmp_path, _OUTSIDE, "from gateway.services.sidecar._impl import VALUE, OTHER, THIRD\n")
+    assert check.check_non_domain_service_imports(tmp_path, {"things"}) == []

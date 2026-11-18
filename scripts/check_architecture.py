@@ -85,6 +85,20 @@ Enforces:
     so a cycle through a package initializer is found. Only imports at module
     scope are read, since an import inside a function or under if TYPE_CHECKING
     does not run when the module loads.
+27. Non-domain service imports: each service package whose name is not a domain
+    DOMAINS.md gives a section carries a ceiling on how many times code outside
+    it reaches below its root, and the count must equal that ceiling. Rule 21
+    covers the packages named for a domain, where reaching below the root is
+    refused outright; this covers the ones that are not domains yet, where the
+    debt is counted instead so it cannot grow. The count rising fails, and the
+    count falling fails until the ceiling is lowered, so every removal is
+    recorded and a package's dissolution is proved by its ceiling reaching zero.
+26. Composition root behavior: no class under api/deps/ defines a method, so the
+    composition root builds things and threads the request's session into them
+    rather than growing an implementation of its own. A class that carries data
+    and no methods is unaffected, so the parameter objects it legitimately holds
+    stay. A class nested in a function counts, since nesting would otherwise be
+    the way around the rule.
 
 Usage:
     uv run python scripts/check_architecture.py
@@ -928,6 +942,85 @@ def check_listener_defaults(src_root: Path) -> list[str]:
     return violations
 
 
+COMPOSITION_ROOT_SCOPE = "gateway/api/deps"
+# The classes with behavior that stood in the composition root when rule 26 landed,
+# each as its path and its qualified name. A class that moves to the domain it
+# belongs to, or loses its methods, fails the check until its entry is removed, so
+# the list only shrinks. Four of them hold a raw session and cannot move until the
+# session-taking service functions take a Unit of Work instead.
+COMPOSITION_ROOT_BEHAVIOR_BASELINE: tuple[tuple[str, str], ...] = (
+    ("gateway/api/deps/__init__.py", "_BatchAccountingClaim"),
+    ("gateway/api/deps/tools.py", "_CodeExecutionEnvironmentPrices"),
+    ("gateway/api/deps/tools.py", "_DirectToolAccounts"),
+    ("gateway/api/deps/tools.py", "_DirectToolGates"),
+    ("gateway/api/deps/tools.py", "_KeySearchCatalogCaller"),
+    ("gateway/api/deps/tools.py", "_ledger_on.Ledger"),
+    ("gateway/api/deps/traces.py", "DatabaseSessionOwners"),
+    ("gateway/api/deps/traces.py", "NoSessionOwners"),
+)
+
+
+def _method_count(class_node: ast.ClassDef) -> int:
+    """The methods a class defines, wherever in its body they stand.
+
+    A method under a conditional block in the body counts, since the block is
+    still the class's own scope. A class or a function nested in the body opens a
+    scope of its own, so what it holds is not the enclosing class's.
+    """
+    methods = 0
+    pending: list[ast.AST] = list(class_node.body)
+    while pending:
+        node = pending.pop()
+        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef):
+            methods += 1
+        elif not isinstance(node, ast.ClassDef):
+            pending.extend(ast.iter_child_nodes(node))
+    return methods
+
+
+def _classes_with_methods(tree: ast.Module) -> Iterator[tuple[int, str, int]]:
+    """Yield the line, qualified name and method count of each class that defines a method.
+
+    Every node is descended through, not only class and function bodies, so a class
+    under a conditional block, a try or a match case is found. Only a class or a
+    function extends the qualified name, because only those name a scope.
+    """
+
+    def walk(node: ast.AST, path: tuple[str, ...]) -> Iterator[tuple[int, str, int]]:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                methods = _method_count(child)
+                if methods:
+                    yield child.lineno, ".".join((*path, child.name)), methods
+                yield from walk(child, (*path, child.name))
+            elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                yield from walk(child, (*path, child.name))
+            else:
+                yield from walk(child, path)
+
+    return walk(tree, ())
+
+
+def check_composition_root_behavior(src_root: Path) -> list[str]:
+    """Check that no class off the baseline has a method under api/deps/, and that every entry still does."""
+    violations: list[str] = []
+    found: set[tuple[str, str]] = set()
+    for relative_path, tree in _parsed_modules(src_root, COMPOSITION_ROOT_SCOPE):
+        for line, name, methods in _classes_with_methods(tree):
+            found.add((relative_path, name))
+            if (relative_path, name) not in COMPOSITION_ROOT_BEHAVIOR_BASELINE:
+                violations.append(
+                    f"{relative_path}:{line} defines {name} with {methods} method(s); the composition root builds "
+                    "things and holds no implementation, so this belongs to the domain whose work it does"
+                )
+    violations.extend(
+        f"{relative_path} is on the composition root behavior baseline for {name}, "
+        "which no longer defines a method there; remove it from the baseline"
+        for relative_path, name in sorted(set(COMPOSITION_ROOT_BEHAVIOR_BASELINE) - found)
+    )
+    return violations
+
+
 # Service modules are purpose-named (guardrails.py, url_safety.py, ...), so
 # there is no *_service.py naming rule to enforce.
 def check_naming_conventions(src_root: Path) -> list[str]:
@@ -1230,6 +1323,92 @@ def check_domain_names(src_root: Path, domains: set[str]) -> list[str]:
         if not (src_root / relative_path).exists() or locations.get(relative_path) in domains
     )
     violations.extend(_baseline_package_modules(src_root))
+    return violations
+
+
+# How many import statements outside each non-domain service package reach below
+# its root. A package here is one DOMAINS.md gives no section, so the target shape
+# dissolves it into the domains it names. The count may only fall, and a fall must
+# be recorded here, which is how the dissolution is proved. This baseline counts
+# rather than enumerates, because the enumeration runs to hundreds of entries and
+# the number is what has to come down.
+NON_DOMAIN_SERVICE_IMPORT_BASELINE: dict[str, int] = {
+    "code_execution": 1,
+    "tenancy": 76,
+}
+
+
+def _non_domain_service_packages(src_root: Path, domains: set[str]) -> list[str]:
+    """The service-layer packages whose name is not a domain DOMAINS.md gives a section."""
+    layer = src_root / SERVICE_SCOPE
+    if not layer.is_dir():
+        return []
+    return sorted(
+        entry.name
+        for entry in layer.iterdir()
+        if entry.is_dir() and (entry / "__init__.py").is_file() and entry.name not in domains
+    )
+
+
+def _below_root_imports(src_root: Path, package: str) -> int:
+    """How many import statements outside a service package name a module below its root.
+
+    The statement's own module decides it, not the names it binds: ``from pkg import Name``
+    reaches the root and is allowed, while ``from pkg.module import Name`` reaches past it.
+    ``_imported_modules`` cannot tell those apart, because it reports ``pkg.Name`` for the
+    first, so the module is read here instead.
+    """
+    prefix = f"{SERVICE_SCOPE.replace('/', '.')}.{package}."
+    inside = f"{SERVICE_SCOPE}/{package}/"
+    counted = 0
+    for relative_path, tree in _parsed_modules(src_root, "gateway"):
+        if relative_path.startswith(inside):
+            continue
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom):
+                module = node.module if node.level == 0 else _resolve_relative(node, src_root / relative_path, src_root)
+                reaches = module is not None and module.startswith(prefix)
+            elif isinstance(node, ast.Import):
+                reaches = any(alias.name.startswith(prefix) for alias in node.names)
+            else:
+                continue
+            if reaches:
+                counted += 1
+    return counted
+
+
+def check_non_domain_service_imports(src_root: Path, domains: set[str]) -> list[str]:
+    """Check each non-domain service package's below-root import count against its ceiling."""
+    if not (src_root / SERVICE_SCOPE).is_dir():
+        return []
+    packages = _non_domain_service_packages(src_root, domains)
+    violations: list[str] = []
+    for package in packages:
+        counted = _below_root_imports(src_root, package)
+        ceiling = NON_DOMAIN_SERVICE_IMPORT_BASELINE.get(package)
+        if ceiling is None and counted == 0:
+            # Nothing reaches below this package's root, so it carries no debt to cap.
+            continue
+        if ceiling is None:
+            violations.append(
+                f"services/{package}/ is not a domain DOMAINS.md gives a section and has no import ceiling; "
+                f"give it one of {counted}, or give the package a section"
+            )
+        elif counted > ceiling:
+            violations.append(
+                f"{counted} imports reach below services/{package}/, above its ceiling of {ceiling}; "
+                f"import what services.{package} exports, or split the package into the domains DOMAINS.md names"
+            )
+        elif counted < ceiling:
+            violations.append(
+                f"only {counted} imports now reach below services/{package}/, under its ceiling of {ceiling}; "
+                "lower the ceiling to that, so the removal cannot be spent again"
+            )
+    violations.extend(
+        f"services/{package}/ has an import ceiling but is no longer a service package that is not a domain; "
+        "remove its ceiling"
+        for package in sorted(set(NON_DOMAIN_SERVICE_IMPORT_BASELINE) - set(packages))
+    )
     return violations
 
 
@@ -2228,6 +2407,10 @@ MODEL_ACCESS: dict[str, ModelAccess] = {
         "repository": "gateway/repositories/identity/blocked_email_repository.py",
         "baseline": (),
     },
+    "gateway.models.identity.ErasedAccount": {
+        "repository": "gateway/repositories/identity/erased_account_repository.py",
+        "baseline": (),
+    },
     "gateway.models.identity.OAuthAppGrant": {
         "repository": "gateway/repositories/identity/oauth_app_grant_repository.py",
         "baseline": (),
@@ -2265,7 +2448,7 @@ MODEL_ACCESS: dict[str, ModelAccess] = {
         "baseline": (),
     },
     "gateway.models.platform.RuntimeSetting": {
-        "repository": None,
+        "repository": "gateway/repositories/organizations/bootstrap_marker_repository.py",
         "baseline": (
             "gateway/services/dashboard_session_service.py",
             "gateway/services/maintenance_mode_service.py",
@@ -2354,6 +2537,10 @@ MODEL_ACCESS: dict[str, ModelAccess] = {
         "repository": "gateway/repositories/providers/hosted_provider_repository.py",
         "baseline": (),
     },
+    "gateway.models.providers.HostedProviderDisabledVendor": {
+        "repository": "gateway/repositories/providers/hosted_provider_repository.py",
+        "baseline": (),
+    },
     "gateway.models.providers.PlatformConnectAttempt": {
         "repository": "gateway/repositories/providers/platform_connect_repository.py",
         "baseline": (),
@@ -2384,6 +2571,18 @@ MODEL_ACCESS: dict[str, ModelAccess] = {
     },
     "gateway.models.health_checks.HealthCheckSettings": {
         "repository": "gateway/repositories/health_checks/health_check_settings_repository.py",
+        "baseline": (),
+    },
+    "gateway.models.mcp_catalog.McpCatalogServer": {
+        "repository": "gateway/repositories/mcp_catalog/mcp_catalog_server_repository.py",
+        "baseline": (),
+    },
+    "gateway.models.mcp_catalog.McpCatalogSyncState": {
+        "repository": "gateway/repositories/mcp_catalog/mcp_catalog_sync_state_repository.py",
+        "baseline": (),
+    },
+    "gateway.models.mcp_catalog.McpLogo": {
+        "repository": "gateway/repositories/mcp_catalog/mcp_logo_repository.py",
         "baseline": (),
     },
     "gateway.models.update_check.UpdateCheckState": {
@@ -2516,6 +2715,26 @@ MODEL_ACCESS: dict[str, ModelAccess] = {
         "repository": "gateway/repositories/tools/sandbox_credential_repository.py",
         "baseline": (),
     },
+    "gateway.models.tools.McpOAuthFlow": {
+        "repository": "gateway/repositories/tools/mcp_oauth_flow_repository.py",
+        "baseline": (),
+    },
+    "gateway.models.tools.McpSignInLinkUse": {
+        "repository": "gateway/repositories/tools/mcp_sign_in_link_use_repository.py",
+        "baseline": (),
+    },
+    "gateway.models.tools.McpServerRequest": {
+        "repository": "gateway/repositories/tools/mcp_server_request_repository.py",
+        "baseline": (),
+    },
+    "gateway.models.tools.McpSharedConnection": {
+        "repository": "gateway/repositories/tools/mcp_user_connection_repository.py",
+        "baseline": (),
+    },
+    "gateway.models.tools.McpUserConnection": {
+        "repository": "gateway/repositories/tools/mcp_user_connection_repository.py",
+        "baseline": (),
+    },
     "gateway.models.tools.SearchToolCredential": {
         "repository": "gateway/repositories/tools/search_tool_repository.py",
         "baseline": (),
@@ -2533,6 +2752,10 @@ MODEL_ACCESS: dict[str, ModelAccess] = {
     },
     "gateway.models.tools.WorkspaceMcpServerGrant": {
         "repository": "gateway/repositories/tools/workspace_mcp_server_grant_repository.py",
+        "baseline": (),
+    },
+    "gateway.models.tools.WorkspaceMcpServerLogo": {
+        "repository": "gateway/repositories/tools/workspace_mcp_server_logo_repository.py",
         "baseline": (),
     },
     "gateway.models.tools.WorkspaceWebSearchConfig": {
@@ -2959,9 +3182,11 @@ def main() -> int:
     domain_name_violations = domains_page_violations + (check_domain_names(SRC_ROOT, domains) if domains else [])
     repository_import_violations = check_repository_imports(SRC_ROOT, domains)
     service_package_import_violations = check_service_package_imports(SRC_ROOT, domains)
+    non_domain_import_violations = check_non_domain_service_imports(SRC_ROOT, domains) if domains else []
     service_root_export_violations = check_service_root_exports(SRC_ROOT)
     model_access_violations = check_model_access(SRC_ROOT)
     import_cycle_violations = check_import_cycles(SRC_ROOT)
+    composition_root_violations = check_composition_root_behavior(SRC_ROOT)
 
     if import_violations:
         print("❌ Architecture violations found:\n")
@@ -3042,6 +3267,18 @@ def main() -> int:
             print(f"  {violation}")
         print(f"\nTotal import cycle violations: {len(import_cycle_violations)}")
 
+    if non_domain_import_violations:
+        print("\n❌ Non-domain service import violations:\n")
+        for violation in non_domain_import_violations:
+            print(f"  {violation}")
+        print(f"\nTotal non-domain service import violations: {len(non_domain_import_violations)}")
+
+    if composition_root_violations:
+        print("\n❌ Composition root behavior violations:\n")
+        for violation in composition_root_violations:
+            print(f"  {violation}")
+        print(f"\nTotal composition root behavior violations: {len(composition_root_violations)}")
+
     if model_access_violations:
         print("\n❌ Model access violations:\n")
         for violation in model_access_violations:
@@ -3063,6 +3300,8 @@ def main() -> int:
         or service_root_export_violations
         or model_access_violations
         or import_cycle_violations
+        or composition_root_violations
+        or non_domain_import_violations
     ):
         print("\n💡 See ARCHITECTURE.md for the intended layering")
         return 1

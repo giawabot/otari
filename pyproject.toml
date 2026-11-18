@@ -14,7 +14,7 @@ version = "0.0.0"
 description = "otari, an OpenAI-compatible AI gateway"
 requires-python = ">=3.13"
 dependencies = [
-    "any-llm-sdk[all]>=1.51.0",
+    "any-llm-sdk[all]>=1.52.0",
     # The web search and web fetch libraries, workspace members at any-search/
     # and any-fetch/. Each may not import the gateway back.
     "any-fetch",
@@ -314,6 +314,8 @@ gateway = [
     "static/dashboard/pwa/*",
     "static/dashboard/fonts/*",
     "data/*.json",
+    # Logos for the Popular MCP servers, from Simple Icons (CC0-1.0).
+    "data/mcp_logos/*.svg",
 ]
 
 [tool.ruff]

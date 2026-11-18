@@ -55,6 +55,9 @@ export type PasswordResponse = Schemas["PasswordResponse"]
 // ---------------------------------------------------------------------------
 export type UpdateProfileRequest = Schemas["UpdateProfileRequest"]
 export type UpdateAvatarRequest = Schemas["UpdateAvatarRequest"]
+// Deleting the signed-in account (`DELETE /v1/auth/account`), confirmed by its
+// address and, where it has one, its password.
+export type DeleteAccountRequest = Schemas["DeleteAccountRequest"]
 
 // ---------------------------------------------------------------------------
 // The public auth flows (otari#650): signup, email verification, and password
@@ -272,6 +275,12 @@ export type CatalogModelSummary = Schemas["CatalogModelSummary"]
 export type CatalogModelDetail = Schemas["CatalogModelDetail"]
 export type CatalogOffering = Schemas["CatalogOffering"]
 export type CatalogCapabilities = Schemas["CatalogCapabilities"]
+// The same catalog folded by provider instance (`/v1/catalog/providers`): the
+// list of providers this deployment serves, and one provider with its models.
+export type CatalogProvidersResponse = Schemas["CatalogProvidersResponse"]
+export type CatalogProviderSummary = Schemas["CatalogProviderSummary"]
+export type CatalogProviderDetail = Schemas["CatalogProviderDetail"]
+export type CatalogProviderModel = Schemas["CatalogProviderModel"]
 export type ModelMetadataOverride = Schemas["ModelMetadataOverrideRequest"]
 export type ModelInputModality = NonNullable<
   ModelMetadataOverride["input_modalities"]
@@ -424,6 +433,21 @@ export type HostedModels = Schemas["HostedModelsPublic"]
 export type CreateHostedModelRequest = Schemas["HostedModelCreateRequest"]
 export type UpdateHostedModelRequest = Schemas["HostedModelUpdateRequest"]
 export type HostedModelsRefresh = Schemas["HostedModelsRefreshPublic"]
+export type HostedModelRates = Schemas["HostedModelRates"]
+export type HostedProviderModelSummary = Schemas["HostedProviderModelSummary"]
+export type HostedVendor = Schemas["HostedVendorPublic"]
+export type UpdateHostedVendorRequest = Schemas["HostedVendorUpdateRequest"]
+export type SwitchHostedVendorModelsRequest = Defaulted<
+  Schemas["HostedVendorModelsSwitchRequest"],
+  "only_unpriced"
+>
+export type HostedVendorModelsSwitch = Schemas["HostedVendorModelsSwitchPublic"]
+export type HostedPriceResetRequest = Defaulted<
+  Schemas["HostedPriceResetRequest"],
+  "dry_run"
+>
+export type HostedPriceReset = Schemas["HostedPriceResetPublic"]
+export type HostedPriceResetChange = Schemas["HostedPriceResetChangePublic"]
 export type HostedAvailableModels = Schemas["HostedAvailableModelsPublic"]
 export type HostedCatalogRefresh = Schemas["HostedCatalogRefreshPublic"]
 export type HostedCatalogProviderRefresh =
@@ -682,6 +706,7 @@ export type WorkspaceProviderPolicy = Schemas["WorkspaceProviderPolicyPublic"]
 export type WorkspaceActivation = Schemas["WorkspaceActivationPublic"]
 export type ActivationAttempt = Schemas["ActivationAttemptPublic"]
 export type ActivationApiKey = Schemas["ActivationApiKeyPublic"]
+export type ActivationIssuedKey = Schemas["ActivationIssuedKeyPublic"]
 /** The failure classes the guide's copy is written for. */
 export type ActivationErrorCategory = NonNullable<
   ActivationAttempt["error_category"]
@@ -743,6 +768,8 @@ export type GuardrailTestResult =
 // `src/gateway/services/tenancy/workspace_mcp_server_service.py`. The stored
 // bearer token is write-only, so the public shape reports only `has_token`.
 export type WorkspaceMcpServer = Schemas["WorkspaceMcpServerPublic"]
+export type WorkspaceMcpServerLogo = Schemas["WorkspaceMcpServerLogoPublic"]
+export type WorkspaceMcpServerLogos = Schemas["WorkspaceMcpServerLogosPublic"]
 export type WorkspaceMcpServers = Schemas["WorkspaceMcpServersPublic"]
 export type WorkspaceMcpServerHealth = Schemas["WorkspaceMcpServerHealth"]
 // A stored server's access list (`everyone_tools` and the grants that override
@@ -755,6 +782,9 @@ export type CreateWorkspaceMcpServerGrantsRequest =
 export type WorkspaceMcpServerAccessCheck =
   Schemas["WorkspaceMcpServerAccessCheck"]
 export type WorkspaceMcpServerKeyAccess = Schemas["WorkspaceMcpServerKeyAccess"]
+// The tools the caller may use on one server, under their own access rule.
+export type WorkspaceMcpServerMyTools = Schemas["WorkspaceMcpServerMyTools"]
+export type McpToolSummary = Schemas["McpToolSummary"]
 export type McpServerCheckFailure = Schemas["CheckFailure"]
 export type CheckWorkspaceMcpServerRequest =
   Schemas["WorkspaceMcpServerCheckRequest"]
@@ -762,6 +792,29 @@ export type CreateWorkspaceMcpServerRequest =
   Schemas["WorkspaceMcpServerCreate"]
 export type UpdateWorkspaceMcpServerRequest =
   Schemas["WorkspaceMcpServerUpdate"]
+export type McpCredentialMode = Schemas["McpCredentialMode"]
+export type McpConnection = Schemas["McpConnectionPublic"]
+export type McpConnections = Schemas["McpConnectionsPublic"]
+export type McpConnectionStarted = Schemas["McpConnectionStarted"]
+export type McpConnectionCompleted = Schemas["McpConnectionCompleted"]
+export type McpServerConnection = Schemas["McpServerConnectionPublic"]
+export type McpServerConnections = Schemas["McpServerConnectionsPublic"]
+
+// The catalog of remote MCP servers a workspace can add, the logos it knows,
+// and the sync that fills it from the MCP Registry.
+export type McpCatalogServer = Schemas["McpCatalogServerPublic"]
+export type McpCatalogServers = Schemas["McpCatalogServersPublic"]
+export type McpCatalogSyncStatus = Schemas["McpCatalogSyncStatus"]
+
+// A member asking a workspace's admins for a catalog server: the member's own
+// requests, and everyone waiting for one server as an admin sees them.
+export type McpServerRequest = Schemas["McpServerRequestPublic"]
+export type McpServerRequests = Schemas["McpServerRequestsPublic"]
+export type McpServerRequester = Schemas["McpServerRequesterPublic"]
+export type McpServerRequestGroup = Schemas["McpServerRequestGroupPublic"]
+export type McpServerRequestGroups = Schemas["McpServerRequestGroupsPublic"]
+export type CreateMcpServerRequest = Schemas["McpServerRequestCreate"]
+export type DeclineMcpServerRequests = Schemas["McpServerRequestDecline"]
 
 // ---------------------------------------------------------------------------
 // Playground

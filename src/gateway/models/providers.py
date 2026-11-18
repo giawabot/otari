@@ -241,6 +241,9 @@ class HostedProvider(Base):
     # The ISO country codes whose requests this provider serves, or None for
     # every country. Checked as well as ``provider_supported_countries``.
     supported_countries: Mapped[list[str] | None] = mapped_column(JSON, default=None)
+    # The upstream's own policies, linked from the public Providers pages.
+    terms_url: Mapped[str | None] = mapped_column(String(1024), default=None)
+    privacy_url: Mapped[str | None] = mapped_column(String(1024), default=None)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None, onupdate=lambda: datetime.now(UTC)
@@ -286,6 +289,28 @@ class HostedProviderModel(Base):
     updated_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), default=None, onupdate=lambda: datetime.now(UTC)
     )
+
+
+class HostedProviderDisabledVendor(Base):
+    """A vendor whose models one hosted provider does not serve.
+
+    A row is the switch turned off: dispatch refuses every model of that
+    vendor on that provider, including models a later refresh offers, while
+    each model's own switch is kept for when the row is deleted. ``provider``
+    holds the hosted provider's name rather than a foreign key, as
+    ``hosted_provider_models`` does, because a provider declared in
+    configuration has no row of its own.
+    """
+
+    __tablename__ = "hosted_provider_disabled_vendors"
+    __table_args__ = (
+        UniqueConstraint("provider", "vendor", name="uq_hosted_provider_disabled_vendors_provider_vendor"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True, default=uuid.uuid4)
+    provider: Mapped[str] = mapped_column(String(64))
+    vendor: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=lambda: datetime.now(UTC))
 
 
 class ConfiguredProviderImport(Base):

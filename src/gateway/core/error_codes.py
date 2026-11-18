@@ -26,6 +26,8 @@ ERROR_PROVIDER_HEADER = "Otari-Error-Provider"
 ERROR_STATUS_HEADER = "Otari-Error-Status"
 ERROR_TAG_HEADER = "Otari-Error-Tag"
 ERROR_RETRYABLE_HEADER = "Otari-Error-Retryable"
+# Where an organization refused for insufficient funds adds them, also sent as ``billing_url`` in the error body.
+BILLING_URL_HEADER = "Otari-Billing-Url"
 
 BUDGET_EXCEEDED = "budget_exceeded"
 # A guardrail refused the request's input or the model's answer.
@@ -54,6 +56,10 @@ STRUCTURED_OUTPUT_FAILED = "structured_output_failed"
 # The model is a kind the endpoint cannot serve, such as an embedding model sent a chat completion.
 WRONG_MODEL_TYPE = "wrong_model_type"
 PRICING_REQUIRED = "pricing_required"
+# A stored MCP server sends each user's own credential, and the caller's user has not signed in to it.
+MCP_SIGN_IN_REQUIRED = "mcp_sign_in_required"
+# A stored MCP server now names another authorization server than the one its OAuth client was first used with.
+MCP_OAUTH_ISSUER_CHANGED = "mcp_oauth_issuer_changed"
 # The organization has no funds paid in to cover a request the deployment pays for.
 INSUFFICIENT_FUNDS = "insufficient_funds"
 # ``deployment_paid_jobs`` is off and a batch or video job would run on a credential the deployment pays for.
@@ -123,9 +129,12 @@ def error_headers(
     budget_scope: str | None = None,
     rule: str | None = None,
     retry_after: int | None = None,
+    billing_url: str | None = None,
 ) -> dict[str, str]:
     """``Otari-Error-Code`` plus any of the extra headers that have a value."""
     headers = {ERROR_CODE_HEADER: code}
+    if billing_url is not None:
+        headers[BILLING_URL_HEADER] = billing_url
     if budget_scope is not None:
         headers[BUDGET_SCOPE_HEADER] = budget_scope
     if retry_after is not None:
@@ -160,5 +169,9 @@ class RefusalException(HTTPException):
 
 
 def body_fields_of(exc: BaseException) -> dict[str, str]:
-    """The fields ``exc`` adds to its error body, empty for anything but a :class:`RefusalException`."""
-    return exc.fields if isinstance(exc, RefusalException) else {}
+    """The fields ``exc`` adds to its error body: a :class:`RefusalException`'s own, and ``billing_url``."""
+    fields = dict(exc.fields) if isinstance(exc, RefusalException) else {}
+    billing_url = (getattr(exc, "headers", None) or {}).get(BILLING_URL_HEADER)
+    if billing_url is not None:
+        fields["billing_url"] = billing_url
+    return fields

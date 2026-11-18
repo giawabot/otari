@@ -21,6 +21,8 @@
 * [Web search](web-search.md)
 * [Code execution](code-execution.md)
 * [MCP servers](mcp-servers.md)
+* [Connect your account to an MCP server](connect-your-account-to-an-mcp-server.md)
+* [Connect an MCP server on a private network](connect-a-private-mcp-server.md)
 
 ## Integrations
 
@@ -71,6 +73,7 @@
 
 ## Providers
 
+* [Connect otari.ai](providers/otari-ai.md)
 * [Connect OpenAI](providers/openai.md)
 * [Connect Gemini](providers/gemini.md)
 * [Connect a llama.cpp server](providers/llamacpp.md)
@@ -82,6 +85,7 @@
 
 * [Workload identity](workload-identity.md)
 * [Health checks](health-checks.md)
+* [MCP server catalog](mcp-catalog.md)
 * [Update check](update-check.md)
 * [Store agent traces](trace-storage.md)
 * [Service keys on a deployment you run](operator-service-keys.md)

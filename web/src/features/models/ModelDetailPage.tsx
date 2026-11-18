@@ -43,6 +43,7 @@ import {
   useOrganizationContext,
 } from "@/shared/api/organizations"
 import { ProviderMark } from "@/shared/components/marks/BrandMark"
+import { followInAppLink, routeHref } from "@/shared/helpers/appLocation"
 import {
   formatContext,
   formatRate,
@@ -340,11 +341,22 @@ function offeringColumns({
       cell: ({ offering: row }) =>
         row.usage_30d ? (
           <span className="flex flex-col items-end">
-            <span className="text-mono-caption">
-              {rate(row.usage_30d.effective_price_per_million)}
-            </span>
+            <Tooltip
+              content={
+                <span className="break-normal">
+                  Blended input and output price you paid over 30 days.
+                </span>
+              }
+            >
+              <span className="text-mono-caption whitespace-nowrap underline decoration-dotted decoration-control-border underline-offset-4">
+                {row.usage_30d.effective_price_per_million == null
+                  ? "—"
+                  : `${formatPricedRate(row.usage_30d.effective_price_per_million, "token")} effective`}
+              </span>
+            </Tooltip>
             <span className="whitespace-nowrap text-caption text-subtle">
-              {row.usage_30d.requests} req · cache{" "}
+              {row.usage_30d.requests}{" "}
+              {row.usage_30d.requests === 1 ? "request" : "requests"} · cache{" "}
               {percent(row.usage_30d.cache_hit_rate)}
             </span>
           </span>
@@ -502,6 +514,7 @@ export function ModelDetailView({
         {publicView ? (
           <a
             href={publicCatalogHref()}
+            onClick={followInAppLink}
             className="text-link hover:text-link-hover"
           >
             ← Models
@@ -540,10 +553,11 @@ export function ModelDetailView({
               // Signup where the deployment offers it, sign-in otherwise; the
               // model is reopened once the new session starts.
               <a
-                href={open_signup ? "#/signup" : "#/"}
-                onClick={() => {
+                href={routeHref(open_signup ? "/signup" : "/")}
+                onClick={(event) => {
                   recordUseModel(model.id)
                   rememberModel(model.id)
+                  followInAppLink(event)
                 }}
                 className={buttonVariants({ variant: "primary" })}
               >
@@ -660,6 +674,9 @@ export function ModelDetailView({
               {model.offering_count} on {model.provider_count}{" "}
               {model.provider_count === 1 ? "provider" : "providers"}, cheapest
               first.
+              {withUsage
+                ? " Yours, 30d is the blended input and output price you paid over 30 days."
+                : null}
             </p>
           </div>
           <div className="flex flex-col gap-3 border border-border bg-surface p-3">

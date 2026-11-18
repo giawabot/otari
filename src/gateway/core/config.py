@@ -21,12 +21,14 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from gateway.core.addresses import normalized_address
 from gateway.core.env import otari_env
+from gateway.core.link_urls import normalize_link_url
 from gateway.core.settings.api_keys import ApiKeySettings
 from gateway.core.settings.budgets import BudgetSettings
 from gateway.core.settings.feedback import FeedbackSettings
 from gateway.core.settings.health_checks import HealthCheckFeatureSettings
 from gateway.core.settings.identity import IdentitySettings
 from gateway.core.settings.inference import InferenceSettings
+from gateway.core.settings.mcp_catalog import McpCatalogSettings
 from gateway.core.settings.organizations import OrganizationSettings
 from gateway.core.settings.pricing import PricingSettings
 from gateway.core.settings.providers import ProviderSettings
@@ -626,6 +628,7 @@ class GatewayConfig(
     ProviderSettings,
     FeedbackSettings,
     HealthCheckFeatureSettings,
+    McpCatalogSettings,
     IdentitySettings,
     OrganizationSettings,
     ToolSettings,
@@ -805,7 +808,8 @@ class GatewayConfig(
     cors_inference_origins: Annotated[list[str], Shown(SettingsGroup.RATE_LIMITING)] = Field(
         default_factory=list,
         description=(
-            "Origins whose pages may call the model endpoints from a browser with an API key, or '*' for any. "
+            "Origins whose pages may call the model and web tool endpoints from a browser with an API key, "
+            "and exchange or revoke an OAuth app token, or '*' for any. "
             "Never with credentials, and no other route: the dashboard's origin belongs in cors_allow_origins."
         ),
     )
@@ -1560,11 +1564,10 @@ class GatewayConfig(
     def ui_link(self, path: str) -> str:
         """An absolute link into the interface, or ``path`` itself when the address is unknown.
 
-        A query on ``ui_base_url`` travels with every link, placed before the hash
-        route: ``https://app.example.com/ui/?edge=a`` and ``/#/verify-email?token=t``
-        give ``https://app.example.com/ui/?edge=a#/verify-email?token=t``, which is
-        the one order a browser keeps the query in the page's own location rather
-        than in the route's.
+        A query on ``ui_base_url`` travels with every link, joined to the page's
+        own query and placed before its fragment: ``https://app.example.com/ui/?edge=a``
+        and ``/verify-email#token=t`` give
+        ``https://app.example.com/ui/verify-email?edge=a#token=t``.
         """
         base = self.effective_ui_base_url
         if not base:
@@ -1803,6 +1806,7 @@ class GatewayConfig(
         *,
         alias_names: Container[str] | None = None,
         hosted_implementation: Callable[[str], str | None] | None = None,
+        own_prefixes: Container[str] = frozenset(),
     ) -> None:
         """Validate a single alias, raising ``ValueError`` with the reason.
 
@@ -1820,7 +1824,9 @@ class GatewayConfig(
         store aliases elsewhere (the runtime ``model_aliases`` table) pass the
         union, so chaining is rejected no matter which side each alias came from.
         ``hosted_implementation`` names the implementation behind a hosted
-        provider's name, so a target may name one.
+        provider's name, so a target may name one. ``own_prefixes`` are the
+        selector prefixes the writing workspace reaches on its organization's own
+        keys, so a target may name a key by its request prefix.
         """
         known_aliases: Container[str] = self.aliases if alias_names is None else alias_names
 
@@ -1842,10 +1848,11 @@ class GatewayConfig(
             msg = f"aliases.{name} target '{target}' must be of the form 'instance:model' or 'provider:model'."
             raise ValueError(msg)
         prefix = target[:cut]
-        if prefix in known_aliases:
+        # Alias names span every workspace, so another workspace's alias may share a key's prefix here.
+        if prefix in known_aliases and prefix not in own_prefixes:
             msg = f"aliases.{name} target '{target}' points at another alias; alias chaining is not supported."
             raise ValueError(msg)
-        if prefix in self.providers:
+        if prefix in self.providers or prefix in own_prefixes:
             return
         # A hosted provider's own name, which the caller passes in where the
         # deployment's database is read: configuration is validated before it is.
@@ -2314,18 +2321,7 @@ class GatewayConfig(
         so a credential written into any of these would reach every browser that
         asked, which no redaction in the operator-gated config viewer would cover.
         """
-        normalized = (value or "").strip()
-        if not normalized:
-            return None
-        parsed = urlsplit(normalized)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-            msg = f"{info.field_name} must be an absolute http(s) URL, got '{value}'"
-            raise ValueError(msg)
-        if parsed.username is not None or parsed.password is not None:
-            # The value is left out of the message: the offending part of it is the credential.
-            msg = f"{info.field_name} must carry no username or password"
-            raise ValueError(msg)
-        return normalized
+        return normalize_link_url(value, info.field_name or "link")
 
     @field_validator("models_dev_base_url")
     @classmethod
@@ -2347,7 +2343,7 @@ class GatewayConfig(
         in the second. A path-prefixed interface writes the whole URL, the way
         ``public_base_url`` already does. A query string is kept, since an edge
         that serves one interface for several deployments may need each link to
-        say which one built it; ``ui_link`` places it ahead of the hash route.
+        say which one built it; ``ui_link`` joins it to each link's own query.
         """
         stripped = (value or "").strip()
         if not stripped:

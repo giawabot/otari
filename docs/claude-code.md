@@ -5,7 +5,7 @@ Otari to put its requests under your budgets, usage tracking and traces.
 
 ## Route Claude Code through Otari
 
-1. On the dashboard's **API keys** page, create a key. Under **Advanced**, set
+1. On the dashboard's **API keys** page, create a key. Under **More options**, set
    **Mismatched `user` field** to **Always accept**. Claude Code puts its own
    telemetry value in that field, and a key left on the default refuses its
    requests with `403`. Spend still goes to the key's user; see
@@ -78,6 +78,36 @@ call can be refused while some budget is left. Claude Code asks for up to 32,000
 output tokens on a model it does not know, which is a large hold on an expensive
 model. When budgets are small, set `CLAUDE_CODE_MAX_OUTPUT_TOKENS` lower. See
 [Budgets](budgets.md).
+
+## Use your workspace's MCP servers
+
+Claude Code does not name Otari's MCP servers in its requests, so Otari adds
+them itself: a server a workspace manager has set to
+[attach to every request](mcp.md#attached-to-every-request) is offered to Claude
+Code beside its own tools, and Otari runs that server's tools for it. Your key
+needs the [`mcp:execute` scope](api-keys.md#scopes); nothing else changes in
+your Claude Code setup.
+
+When the server uses each person's own account and you have not signed in yet:
+
+1. Ask, for example "check my open Jira tasks".
+2. Claude answers with a sign-in link. Check that it starts with your
+   deployment's `public_base_url` exactly, without a trailing `/` if it has
+   one, followed by `/api/v1/mcp-connections/sign-in#ticket=`, then open it
+   within 30 minutes. It works once: if the sign-in does not finish, ask again
+   for a new one.
+   That address can differ from the one you send requests to; ask your operator
+   if you do not know it. The page names the Otari user your account will
+   be attached to: check that it is you, continue, and sign in with your own
+   account. Keep the link to yourself, and never open one someone else sent you:
+   whoever continues through a link connects their account to the user it was
+   made for.
+3. A page says you are signed in. Go back to Claude Code and ask again.
+
+The second ask runs against your own account. The key you set in
+`ANTHROPIC_AUTH_TOKEN` must belong to you for this to work: a key created
+without a user gets no link. See
+[Connect your account to an MCP server](connect-your-account-to-an-mcp-server.md#connect-from-your-coding-agent-instead).
 
 ## Choosing a model
 
@@ -246,8 +276,8 @@ otari import claude-code
 - Re-running imports only what is new.
 - Only token counts and identifiers are read, never prompts, completions or tool
   payloads.
-- Each session is labeled `<hostname>:<project>`, so you can group usage per
-  repository on the **Overview**.
+- Each session is labeled `<hostname>:<project>`, so the usage APIs can filter
+  usage per repository by session label.
 - The first event is sent on its own, so a rejection (an unknown user, a key that
   is not budget-exempt) shows before the rest is uploaded.
 

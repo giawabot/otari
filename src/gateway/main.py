@@ -68,10 +68,22 @@ from gateway.core.database import (
     release_session,
     sqlite_database_file,
 )
-from gateway.core.error_codes import ERROR_CODE_HEADER, INVALID_REQUEST, body_fields_of, error_code_of, error_headers
+from gateway.core.error_codes import (
+    BILLING_URL_HEADER,
+    ERROR_CODE_HEADER,
+    INVALID_REQUEST,
+    body_fields_of,
+    error_code_of,
+    error_headers,
+)
 from gateway.core.feature import CoreFeature, Worker
 from gateway.core.unit_of_work import create_unit_of_work, create_unit_of_work_with_session
-from gateway.dashboard import DASHBOARD_PACKAGE_PATH, get_dashboard_build_id, get_dashboard_dir
+from gateway.dashboard import (
+    DASHBOARD_PACKAGE_PATH,
+    dashboard_fallback,
+    get_dashboard_build_id,
+    get_dashboard_dir,
+)
 from gateway.exceptions import TenancyError
 from gateway.exceptions.tools_exceptions import DirectToolCallError
 from gateway.inflight import InFlightMiddleware, InFlightRegistry
@@ -725,6 +737,7 @@ _CORS_ALLOW_HEADERS = (
 # A speech response carries its cost on headers, which a browser on
 # another origin reads only when they are exposed.
 _CORS_EXPOSE_HEADERS = (
+    BILLING_URL_HEADER,
     COST_USD_HEADER,
     ERROR_CODE_HEADER,
     PRICING_SOURCE_HEADER,
@@ -733,9 +746,10 @@ _CORS_EXPOSE_HEADERS = (
     # The scope a refused key lacks, which a browser client cannot read unexposed.
     "WWW-Authenticate",
 )
-# The model endpoints ``cors_inference_origins`` opens to a browser: each one
-# takes an API key and calls a model, except the model list a page reads to
-# offer its models, and none changes the deployment.
+# The endpoints ``cors_inference_origins`` opens to a browser: each one takes
+# an API key, or (the OAuth app token exchange) a code and its verifier, and
+# none takes a session or changes the deployment. The model list and the tool
+# list are what a page reads to offer models and web tools.
 _INFERENCE_CORS_PATHS = frozenset(
     {
         f"{API_ROOT}/chat/completions",
@@ -746,9 +760,20 @@ _INFERENCE_CORS_PATHS = frozenset(
         f"{API_ROOT}/rerank",
         f"{API_ROOT}/moderations",
         f"{API_ROOT}/models",
+        f"{API_ROOT}/search",
+        f"{API_ROOT}/fetch",
+        f"{API_ROOT}/tools",
+        f"{API_ROOT}/oauth/apps/token",
+        f"{API_ROOT}/oauth/apps/revoke",
     }
 )
-_INFERENCE_CORS_PREFIXES = (f"{API_ROOT}/audio/", f"{API_ROOT}/images/", f"{API_ROOT}/models/")
+_INFERENCE_CORS_PREFIXES = (
+    f"{API_ROOT}/audio/",
+    f"{API_ROOT}/images/",
+    f"{API_ROOT}/models/",
+    f"{API_ROOT}/search/",
+    f"{API_ROOT}/fetch/",
+)
 # Under the model list's prefix but for the operator alone, so a page never needs them.
 _INFERENCE_CORS_OPERATOR_PATHS = frozenset({f"{API_ROOT}/models/discoverable", f"{API_ROOT}/models/metadata"})
 
@@ -865,7 +890,10 @@ def _add_security_headers(headers: MutableHeaders, path: str, status_code: int) 
     elif serves_content and (path in _CACHEABLE_PATHS or path.startswith(_SHORT_CACHE_PREFIXES)):
         headers.setdefault("Cache-Control", "public, max-age=86400")
     else:
-        headers["Cache-Control"] = "private, no-store, no-cache"
+        # A route may let the signed-in browser alone keep what it served (an MCP server's logo), never a shared cache.
+        own = headers.get("Cache-Control", "")
+        if not (serves_content and own.startswith("private, max-age=")):
+            headers["Cache-Control"] = "private, no-store, no-cache"
         vary_values = {part.strip() for part in headers.get("Vary", "").split(",") if part.strip()}
         vary_values.add("Authorization")
         headers["Vary"] = ", ".join(sorted(vary_values))
@@ -1365,13 +1393,13 @@ async def _http_exception_handler(request: Request, exc: Exception) -> Response:
     A body field survives where a header does not (a proxy that drops it, an SDK
     that surfaces only the body), so a client can map the refusal from either.
     A ``BodyHTTPException`` is answered with its own body rather than under ``detail``.
-    A ``RefusalException`` adds its fields beside ``code``.
+    A ``RefusalException`` adds its fields beside ``code``, as ``Otari-Billing-Url`` adds ``billing_url``.
     """
     if not isinstance(exc, StarletteHTTPException):
         raise exc
     code = error_code_of(exc.headers)
     if isinstance(exc, BodyHTTPException):
-        body = exc.body if code is None else {**exc.body, "code": code}
+        body = exc.body if code is None else {**exc.body, "code": code, **body_fields_of(exc)}
         return with_request_id(request, JSONResponse(body, status_code=exc.status_code, headers=exc.headers))
     if code is None:
         return with_request_id(request, await http_exception_handler(request, exc))
@@ -1407,7 +1435,7 @@ async def _tenancy_error_handler(request: Request, exc: Exception) -> Response:
         # The direct tool service wrote this answer for the caller, 5xx included, and its
         # headers carry the refusal's code or a provider failure's safe fields.
         code = error_code_of(exc.headers)
-        body = {"detail": exc.message} if code is None else {"detail": exc.message, "code": code}
+        body = {"detail": exc.message} if code is None else {"detail": exc.message, "code": code, **body_fields_of(exc)}
         return with_request_id(request, JSONResponse(body, status_code=exc.status_code, headers=exc.headers))
     if exc.status_code >= status.HTTP_500_INTERNAL_SERVER_ERROR:
         logger.error("Tenancy request failed: %s", exc.message)
@@ -1550,12 +1578,10 @@ def create_app(config: GatewayConfig) -> FastAPI:
     async def oauth_callback_landing(provider: str, request: Request) -> RedirectResponse:
         """Bounce a provider's redirect into the dashboard page that finishes it.
 
-        This path exists because a redirect URI may not carry a fragment
-        (RFC 6749; Google rejects one outright) and every dashboard page in
-        front of a session is a hash route. So the provider is given an
-        ordinary path, and this turns it into the hash route
-        ``DeploymentRoot`` renders ahead of the auth gate, carrying the
-        query the provider appended.
+        The provider is given a path this process always answers, because the
+        dashboard may be served from another origin or path prefix than the
+        gateway. This sends the browser to the page ``DeploymentRoot`` renders
+        ahead of the auth gate, carrying the query the provider appended.
 
         It holds no credential and decides nothing: the code in that query
         is spent by ``POST /api/v1/auth/oauth/{provider}/callback``, which the
@@ -1591,8 +1617,8 @@ def create_app(config: GatewayConfig) -> FastAPI:
         )
 
     # The page reads /api/v1/bootstrap to learn which surfaces exist here. The dashboard is a
-    # single-page app, so a static mount for /assets plus an index.html at / is
-    # all it needs (navigation is client-side).
+    # single-page app, so a static mount for /assets plus its index.html at / and
+    # at each of its own paths is all it needs (navigation is client-side).
     dashboard_dir = get_dashboard_dir()
     if dashboard_dir is not None:
         index_file = dashboard_dir / "index.html"
@@ -1629,6 +1655,10 @@ def create_app(config: GatewayConfig) -> FastAPI:
         @app.get("/dashboard-build.json", include_in_schema=False)
         async def dashboard_build() -> dict[str, str]:
             return {"build": get_dashboard_build_id(dashboard_dir), "version": __version__}
+
+        # Every other page of the dashboard is the same index.html, answered only
+        # once no route or mount has taken the path.
+        app.router.default = dashboard_fallback(index_file, app.router.not_found)
     else:
         # A missing bundle means nobody built it, which is the ordinary state of a
         # source checkout now that the bundle is gitignored rather than committed.
