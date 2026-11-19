@@ -46,7 +46,7 @@ def _response(*, output: list[Any] | None = None, status: str = "completed") -> 
         tools=[],
         usage=ResponseUsage(
             input_tokens=5,
-            input_tokens_details=InputTokensDetails(cached_tokens=0),
+            input_tokens_details=InputTokensDetails(cached_tokens=0, cache_write_tokens=0),
             output_tokens=2,
             output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
             total_tokens=7,
@@ -385,7 +385,7 @@ def test_mcp_servers_dispatches_through_responses_tool_loop(
             json={
                 "model": _MODEL,
                 "input": "hi",
-                "mcp_servers": [{"name": "test", "url": "http://127.0.0.1:9999/mcp"}],
+                "mcp_servers": [{"name": "test", "url": "http://93.184.216.34/mcp"}],
             },
             headers=api_key_header,
         )
@@ -902,7 +902,7 @@ def test_stream_mcp_servers_dispatches_through_tool_loop_stream(
                 "model": _MODEL,
                 "input": "hi",
                 "stream": True,
-                "mcp_servers": [{"name": "test", "url": "http://127.0.0.1:9999/mcp"}],
+                "mcp_servers": [{"name": "test", "url": "http://93.184.216.34/mcp"}],
             },
             headers=api_key_header,
         )
@@ -947,7 +947,7 @@ def test_stream_mcp_pool_close_failure_does_not_cut_off_the_stream(
                 "model": _MODEL,
                 "input": "hi",
                 "stream": True,
-                "mcp_servers": [{"name": "test", "url": "http://127.0.0.1:9999/mcp"}],
+                "mcp_servers": [{"name": "test", "url": "http://93.184.216.34/mcp"}],
             },
             headers=api_key_header,
         )

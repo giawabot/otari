@@ -318,8 +318,12 @@ class HostedLookup:
     own_name_only: bool
 
     def accepts(self, response_provider: str, instance: str) -> bool:
-        """Whether a hosted answer for ``response_provider`` may serve the ``instance`` candidate."""
-        return not self.own_name_only or response_provider == instance
+        """Whether a hosted answer for ``response_provider`` may serve the ``instance`` candidate.
+
+        A region of the provider (``ollama@eu``) answers for the provider's own
+        name; a candidate that already names a region takes that region alone.
+        """
+        return not self.own_name_only or response_provider == instance or _region_parent(response_provider) == instance
 
 
 def hosted_lookup(provider: LLMProvider) -> HostedLookup:
@@ -346,6 +350,21 @@ def _no_hosted_names(_name: str) -> str | None:
 # composition root (``configure_hosted_names``) as pricing's provider types
 # are: the names live in ``services/providers``, which imports this module.
 _hosted_names: Callable[[str], str | None] = _no_hosted_names
+
+
+def _no_region_parent(_name: str) -> str | None:
+    return None
+
+
+# The hosted provider a name is a region of, registered by the composition root
+# as the hosted names are.
+_region_parent: Callable[[str], str | None] = _no_region_parent
+
+
+def configure_region_parents(resolver: Callable[[str], str | None] | None) -> None:
+    """Register the lookup from a hosted provider region's name to its provider's; None unregisters it."""
+    global _region_parent  # noqa: PLW0603
+    _region_parent = resolver or _no_region_parent
 
 
 def configure_hosted_names(resolver: Callable[[str], str | None] | None) -> None:
@@ -551,10 +570,12 @@ def get_provider_kwargs(
     lookup = instance if instance is not None else provider.value
     kwargs: dict[str, Any] = {}
     raw_config = config.providers.get(lookup)
+    tenant_endpoint = False
     if raw_config is None and workspace_id is not None:
         # A slug names one key of its own; any other instance reads the provider's.
         named = lookup if cached_org_slug_provider(workspace_id, lookup) is not None else provider.value
         raw_config = cached_org_provider_kwargs(workspace_id, named)
+        tenant_endpoint = raw_config is not None and bool(raw_config.get("api_base"))
     if raw_config is not None:
         provider_config = {k: v for k, v in raw_config.items() if k not in _INSTANCE_META_KEYS}
 
@@ -602,6 +623,18 @@ def get_provider_kwargs(
     placeholder = keyless_placeholder_api_key(kwargs.get("api_base"), kwargs.get("api_key"))
     if placeholder is not None:
         kwargs["api_key"] = placeholder
+
+    if tenant_endpoint:
+        # An organization chose this address, so the SDK dials it only through
+        # the client that checks it is public on every request and connects to
+        # the address it checked. Imported here: the providers package imports
+        # this module through model discovery.
+        from gateway.services.providers import owned_endpoint_sdk_client
+
+        kwargs["client_args"] = {
+            **(kwargs.get("client_args") or {}),
+            "http_client": owned_endpoint_sdk_client(provider),
+        }
 
     return kwargs
 

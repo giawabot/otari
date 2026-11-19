@@ -128,6 +128,7 @@ from gateway.services.secret_box import (
 from gateway.services.tenancy import authorization
 from gateway.services.tenancy.organization_service import OrganizationService
 from gateway.services.tools import (
+    AttachedMcpServerIndex,
     CompletedConnection,
     LinkSignIn,
     McpConnectionService,
@@ -142,7 +143,7 @@ from gateway.services.tools import (
     WorkspaceMcpServerHealth,
     mcp_server_contacts,
 )
-from gateway.services.url_safety import UnsafeURLError, redact_url_secrets, validate_mcp_url
+from gateway.services.url_safety import UnsafeURLError, mcp_private_hosts, redact_url_secrets, validate_mcp_url
 
 MAX_ALLOWED_TOOLS = WorkspaceMcpServerHealth.MAX_ALLOWED_TOOLS
 MAX_TOOL_NAME_LENGTH = WorkspaceMcpServerHealth.MAX_TOOL_NAME_LENGTH
@@ -796,7 +797,7 @@ async def _validate_url(url: str, *, has_token: bool) -> None:
     under a URL that was safe when it was stored.
     """
     try:
-        await validate_mcp_url(url, has_authorization_token=has_token)
+        await validate_mcp_url(url, has_authorization_token=has_token, private_hosts=mcp_private_hosts())
     except UnsafeURLError as exc:
         raise WorkspaceMcpServerUnsafeUrlError(str(exc)) from exc
 
@@ -865,7 +866,7 @@ async def _check(server: WorkspaceMcpServer, token: str | None | _NoCredential) 
     if isinstance(token, _NoCredential):
         return ServerCheck(tool_names=[], failure=CheckFailure.CREDENTIALS_UNAVAILABLE)
     try:
-        await validate_mcp_url(server.url, has_authorization_token=token is not None)
+        await validate_mcp_url(server.url, has_authorization_token=token is not None, private_hosts=mcp_private_hosts())
     except UnsafeURLError:
         return ServerCheck(tool_names=[], failure=CheckFailure.UNSAFE_URL)
     return await _connect(server.url, token, server_id=server.id)
@@ -1310,8 +1311,8 @@ class WorkspaceMcpServers:
         )
 
     async def any_attached(self, workspace_id: uuid.UUID) -> bool:
-        """Whether the workspace has an enabled server marked ``attach_by_default``, in one indexed read."""
-        return await WorkspaceMcpServerRepository(self._db).any_attached(workspace_id)
+        """Whether the workspace has an enabled server marked ``attach_by_default``, as this worker last read it."""
+        return AttachedMcpServerIndex.has_attached(workspace_id)
 
     async def list_reachable(self, workspace_id: uuid.UUID, access: McpAccess) -> list[McpServerSummary]:
         """See :func:`list_reachable_mcp_servers`."""
@@ -1693,6 +1694,7 @@ class WorkspaceMcpServerService:
                 added_by=user.id,
             )
         await self.db.commit()
+        await AttachedMcpServerIndex.refresh_after_write()
         # After the commit, so a server that fails its check is still stored:
         # it may be registered before it is up, and `health` says what failed.
         await self._record_check(server)
@@ -1821,6 +1823,7 @@ class WorkspaceMcpServerService:
 
         await self.db.commit()
         McpConnectionService.revoke_in_background(revocations, unread=unread)
+        await AttachedMcpServerIndex.refresh_after_write()
         if connection_changed:
             await self._record_check(server)
         else:
@@ -2157,6 +2160,7 @@ class WorkspaceMcpServerService:
         await self.db.delete(server)
         await self.db.commit()
         McpConnectionService.revoke_in_background(revocations, unread=unread)
+        await AttachedMcpServerIndex.refresh_after_write()
 
     async def my_tools(self, *, user: User, workspace_id: uuid.UUID, server_id: uuid.UUID) -> WorkspaceMcpServerMyTools:
         """The tools the caller may use on a server, for any member who can see the workspace.

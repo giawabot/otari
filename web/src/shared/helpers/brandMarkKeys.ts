@@ -3,8 +3,8 @@
  *
  * Split from {@link brandMarks} because the two questions have different
  * costs. "Does this list need a mark slot" is asked at first paint, for every
- * row, and answering it needs ~60 short strings. "What shapes draw this mark"
- * is 70 kB of path data that only matters once something is on screen. Held
+ * row, and answering it needs ~80 short strings. "What shapes draw this mark"
+ * is about 130 kB of path data that only matters once something is on screen. Held
  * together, every visitor to the Models page downloaded all of the art before
  * the page painted, for the handful of providers a deployment actually has.
  *
@@ -51,6 +51,7 @@ const PROVIDER_MARK_IDS: ReadonlySet<string> = new Set([
   "qiniu",
   "sambanova",
   "together",
+  "typesafe",
   "vertexai",
   "vertexaianthropic",
   "vllm",
@@ -65,12 +66,20 @@ const MAKER_MARK_SLUGS: ReadonlySet<string> = new Set([
   "ai21",
   "alibaba",
   "anthropic",
+  "baai",
+  "black-forest-labs",
+  "bosonai",
   "bytedance",
+  "canopylabs",
+  "cartesia",
   "cohere",
   "deepseek",
+  "elorian",
   "fireworks",
   "google",
   "ibm",
+  "ideogram",
+  "lightricks",
   "meta",
   "microsoft",
   "minimax",
@@ -79,8 +88,17 @@ const MAKER_MARK_SLUGS: ReadonlySet<string> = new Set([
   "nousresearch",
   "nvidia",
   "openai",
+  "openbmb",
   "perplexity",
+  "pixverse",
+  "prunaai",
+  "reflection",
+  "sesame",
+  "stabilityai",
+  "stepfun",
+  "tencent",
   "xai",
+  "xiaomi",
   "z-ai",
 ])
 
@@ -105,6 +123,20 @@ const HARNESS_MARK_IDS: ReadonlySet<string> = new Set([
   "zed",
   "curl",
 ])
+
+/** Client languages with a mark, by the `client_language` a session carries, and how each reads. */
+const LANGUAGE_LABELS: Readonly<Record<string, string>> = {
+  python: "Python",
+  javascript: "JavaScript",
+  go: "Go",
+  java: "Java",
+  rust: "Rust",
+  ruby: "Ruby",
+}
+
+const LANGUAGE_MARK_IDS: ReadonlySet<string> = new Set(
+  Object.keys(LANGUAGE_LABELS),
+)
 
 /**
  * The ids this deployment serves its own models under.
@@ -152,9 +184,21 @@ export function hasHarnessMark(harness: string): boolean {
   return HARNESS_MARK_IDS.has(normalize(harness))
 }
 
+/** The same question for a client's language. */
+export function hasLanguageMark(language: string): boolean {
+  return LANGUAGE_MARK_IDS.has(normalize(language))
+}
+
+/** A client language as it reads, `Python` for `python`, or the value itself when unknown. */
+export function languageLabel(language: string): string {
+  const key = normalize(language)
+  return LANGUAGE_MARK_IDS.has(key) ? LANGUAGE_LABELS[key] : language
+}
+
 /** Read by the drift gate beside this module, not by the app. */
 export const MARK_KEYS_FOR_TEST = {
   providers: PROVIDER_MARK_IDS,
   makers: MAKER_MARK_SLUGS,
   harnesses: HARNESS_MARK_IDS,
+  languages: LANGUAGE_MARK_IDS,
 }

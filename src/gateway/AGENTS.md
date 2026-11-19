@@ -260,6 +260,16 @@ budgets and dials them only through the pinned, no-redirect client in
 `_owned_endpoint_network.py`. Their `api_base` is a tenant's, so it is held to
 public addresses whatever `provider_allow_private_hosts` says.
 
+An organization's provider key (`services/tenancy/org_provider_key_service.py`)
+is held the same way. Its `api_base` is refused at write unless it reaches
+public addresses and its provider is in `TENANT_ENDPOINT_PROVIDERS`
+(`core/provider_params.py`), the SDKs that take an injected client;
+`get_provider_kwargs` then hands that SDK the pinned client on every dispatch,
+and the key's model discovery dials through it too. Its `client_args` are held
+to `tenant_client_args_allowed`, refused at write and dropped from a row
+stored before, because other names reach the SDK constructor and can choose
+the destination, the transport, the headers or an ambient credential.
+
 Provider resolution asks `ModelProviderPort` for a deployment-owned credential
 only after local and tenant BYO sources fail. The core adapter answers from the
 deployment's hosted providers (`services/providers`, the `hosted_providers`
@@ -269,6 +279,19 @@ A vendor switched off on a hosted provider (`hosted_provider_disabled_vendors`,
 vendor read by `_hosted_vendors.vendor_of`) is refused in both
 `HostedProviderRuntime.resolve` and `serveable_models`, so dispatch and the
 catalog agree; change one and change the other.
+
+A hosted provider with regions (`hosted_provider_regions`, `_hosted_regions.py`)
+answers the port with its first enabled region and the rest as the
+credential's `alternates`. The gateway side narrows them, in order, to the
+workspace's data locations (`narrow_to_workspace_locations` in
+`hosted_credential_for`) and then to the request's country
+(`ensure_hosted_country`). An overlay adapter that returns no alternates keeps
+its behavior while the workspace lists no data locations; for a workspace that
+does, its credential must declare a `data_location` on the list or it is
+refused. A region is addressed as `<name>@<slug>`, resolved from the region
+rows and never by splitting a name (`get_serving`, `HostedRegionIndex`), since
+a provider named before regions may hold `@`: it is the instance a request
+settles under, and a pricing key that falls back to its provider's.
 
 A provider's own SDK variable (`OPENAI_API_KEY`) is never a credential: a key
 reaches a call only from the kwargs `get_provider_kwargs` builds (an entry's
