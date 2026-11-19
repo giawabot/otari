@@ -6,7 +6,7 @@ usage column carries proof-of-routing (requested bar, served level) on
 the row that settled a residency-gated request.
 
 Revision ID: d6a8c0e2f4b6
-Revises: c4e7a9b2d6f8
+Revises: d5a7c9e1b3f4
 Create Date: 2026-09-14 00:00:00.000000
 
 """
@@ -18,7 +18,7 @@ from alembic import op
 
 # revision identifiers, used by Alembic.
 revision: str = "d6a8c0e2f4b6"
-down_revision: str | Sequence[str] | None = "b7e2c9d4f1a6"
+down_revision: str | Sequence[str] | None = "d5a7c9e1b3f4"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
