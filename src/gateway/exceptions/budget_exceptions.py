@@ -183,6 +183,13 @@ class OrganizationScopedBudgetNotFoundError(TenancyNotFoundError):
         super().__init__(f"Spend ceiling {ceiling_id} not found")
 
 
+class OrganizationMemberBudgetNotFoundError(TenancyNotFoundError):
+    """No personal spend ceiling applies to the caller in their active organization."""
+
+    def __init__(self) -> None:
+        super().__init__("No personal spend ceiling applies in this organization")
+
+
 class OrganizationScopedBudgetAlreadyExistsError(TenancyConflictError):
     """One ceiling per scope, and per scope and provider.
 
@@ -342,6 +349,7 @@ __all__ = [
     "OrganizationBudgetHeldElsewhereError",
     "OrganizationBudgetInUseError",
     "OrganizationBudgetNotFoundError",
+    "OrganizationMemberBudgetNotFoundError",
     "OrganizationScopeNotFoundError",
     "OrganizationScopedBudgetAlreadyExistsError",
     "OrganizationScopedBudgetNotFoundError",

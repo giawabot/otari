@@ -321,6 +321,7 @@ export type CreateOrganizationSpendCeiling =
   Schemas["OrganizationScopedBudgetCreate"]
 export type UpdateOrganizationSpendCeiling =
   Schemas["OrganizationScopedBudgetUpdate"]
+export type MyBudget = Schemas["MyBudgetPublic"]
 export type ProviderInfo = Schemas["ProviderInfoSchema"]
 export type ProvidersResponse = Schemas["ProvidersResponse"]
 export type ProviderHealth = Schemas["ProviderHealthSchema"]

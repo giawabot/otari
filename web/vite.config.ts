@@ -83,6 +83,9 @@ export default defineConfig({
   ],
   resolve: {
     alias: {
+      "@/app/nav/overlayWalletSlot": fileURLToPath(
+        new URL("./src/app/nav/northrouterWalletSlot.tsx", import.meta.url),
+      ),
       "@": fileURLToPath(new URL("./src", import.meta.url)),
     },
   },

@@ -32,6 +32,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, Query, status
 from pydantic import BaseModel, Field
 
 from gateway.api.deps import (
+    BudgetServiceDep,
     CurrentIdentity,
     IdentityServiceDep,
     InvitationMailLimitDep,
@@ -69,6 +70,7 @@ from gateway.models.tenancy import (
     ResidencyFloorUpdateRequest,
     SwitchActiveOrganizationRequest,
 )
+from gateway.schemas.budgets import MyBudgetPublic
 from gateway.schemas.organizations import OrganizationRefusal
 
 # Auth is declared on the router, not left to arrive through `CurrentIdentity`:
@@ -142,6 +144,23 @@ async def get_active_organization_context(
 ) -> OrganizationMembershipContextPublic:
     """Get the caller's active organization and their standing in it."""
     return await service.get_active_membership_context_for_user(current_identity, sso_enforcement=connections)
+
+
+@router.get(
+    "/me/my-budget",
+    responses={
+        status.HTTP_404_NOT_FOUND: {
+            "model": OrganizationRefusal,
+            "description": "No personal spend ceiling applies to the caller in their active organization.",
+        }
+    },
+)
+async def get_caller_organization_budget(
+    service: BudgetServiceDep,
+    current_identity: CurrentIdentity,
+) -> MyBudgetPublic:
+    """Get the binding personal spend ceiling for the caller in their active organization."""
+    return await service.get_my_organization_budget(user=current_identity)
 
 
 @router.patch("/me")

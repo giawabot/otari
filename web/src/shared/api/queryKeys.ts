@@ -94,6 +94,14 @@ export const ORGANIZATIONS = "organizations"
 // straight into it, and the spend-ceilings read binds its role gate to whatever
 // object is cached under it.
 export const ORGANIZATION_CONTEXT = [ORGANIZATIONS, "context"] as const
+// NorthRouter billing overlay: the active organization's prepaid account read
+// by the top-bar wallet chip. Keyed on the organization id at the call site so
+// an organization switch refetches; nothing else invalidates it.
+export const NR_BILLING_ACCOUNT = "nr-billing-account"
+// The caller's own binding personal spend ceiling in the active organization,
+// read by the top-bar wallet chip for non-managers. Keyed on the organization
+// id so switching organizations refetches it.
+export const ORGANIZATION_MY_BUDGET = "organization-my-budget"
 // Deliberately its own key rather than a child of ORGANIZATIONS: switching
 // organizations invalidates both, but a role change invalidates only the roster,
 // and nesting would re-read the context (and every page gated on it) as well.
