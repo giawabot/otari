@@ -629,7 +629,7 @@ def test_a_responses_stream_that_reaches_its_terminal_event_ends_cleanly(
     """Each event the Responses API ends a response with completes the stream, whatever the response's status."""
     usage = ResponseUsage(
         input_tokens=45,
-        input_tokens_details=InputTokensDetails(cached_tokens=0),
+        input_tokens_details=InputTokensDetails(cached_tokens=0, cache_write_tokens=0),
         output_tokens=3,
         output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
         total_tokens=48,
@@ -704,7 +704,7 @@ def _stream_responses_with_lookup(
         patch("gateway.services.mcp_loop_responses.aresponses", new=_scripted_aresponses(*rounds)),
     ):
         return _post_responses_stream(
-            client, headers, mcp_servers=[{"name": "docs", "url": "http://127.0.0.1:9999/mcp"}]
+            client, headers, mcp_servers=[{"name": "docs", "url": "http://93.184.216.34/mcp"}]
         )
 
 

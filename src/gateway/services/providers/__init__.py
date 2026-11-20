@@ -22,6 +22,7 @@ from gateway.services.providers._hosted_catalog_update import (
 )
 from gateway.services.providers._hosted_credentials import last4, normalize_api_base, public_api_base
 from gateway.services.providers._hosted_name_index import (
+    HostedRegionIndex,
     hosted_implementation,
     load_hosted_names_at_startup,
     reset_hosted_name_index,
@@ -47,7 +48,13 @@ from gateway.services.providers._missing_credential import (
     unpriced_model_refusal,
 )
 from gateway.services.providers._org_provider_model_service import OrgProviderModelService
-from gateway.services.providers._owned_endpoint_network import owned_endpoint_http_client, owned_endpoint_sdk_client
+from gateway.services.providers._owned_endpoint_network import (
+    OwnedEndpointHttpx2Transport,
+    OwnedEndpointSyncTransport,
+    OwnedEndpointTransport,
+    owned_endpoint_http_client,
+    owned_endpoint_sdk_client,
+)
 from gateway.services.providers._platform_connect import (
     PLATFORM_PROVIDER_NAME,
     PlatformClient,
@@ -86,11 +93,15 @@ __all__ = [
     "CountryNotServedError",
     "HostedCatalogUpdate",
     "HostedProviderService",
+    "HostedRegionIndex",
     "HostedSources",
     "LiveByoPairs",
     "OrganizationExists",
     "OrgProviderModelService",
     "OwnedEndpoint",
+    "OwnedEndpointHttpx2Transport",
+    "OwnedEndpointSyncTransport",
+    "OwnedEndpointTransport",
     "PLATFORM_PROVIDER_NAME",
     "PlatformClient",
     "PlatformConnectService",

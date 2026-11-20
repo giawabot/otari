@@ -76,7 +76,7 @@ from .conftest import ALL_KEY_SCOPES, MODEL_NAME, admitted_search_spy
 _MCP_TOOL = "lookup"
 # The hit carries its page text, so a search reads no page and every page read is a fetch call.
 _HITS = [{"url": "https://python.org", "title": "Python", "text": "3.14"}]
-_MCP_SERVER = {"name": "docs", "url": "http://127.0.0.1:9999/mcp"}
+_MCP_SERVER = {"name": "docs", "url": "http://93.184.216.34/mcp"}
 _SEARCH = {"type": "otari_web_search"}
 _FETCH = {"type": "otari_web_fetch"}
 _CODE = {"type": "otari_code_execution"}
@@ -820,7 +820,7 @@ def _response(output: list[Any]) -> Response:
         tools=[],
         usage=ResponseUsage(
             input_tokens=5,
-            input_tokens_details=InputTokensDetails(cached_tokens=0),
+            input_tokens_details=InputTokensDetails(cached_tokens=0, cache_write_tokens=0),
             output_tokens=2,
             output_tokens_details=OutputTokensDetails(reasoning_tokens=0),
             total_tokens=7,
@@ -881,7 +881,6 @@ def _streamed_function_calls() -> AsyncIterator[Any]:
                 type="response.function_call_arguments.done",
                 item_id=f"fc_{index}",
                 output_index=index,
-                name=call.name,
                 arguments=call.arguments,
                 sequence_number=0,
             ),

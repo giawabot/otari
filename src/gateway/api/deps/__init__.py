@@ -217,6 +217,7 @@ from gateway.repositories.overview.overview_repository import OverviewRepository
 from gateway.repositories.pricing import ModelPricingRepository, OrganizationModelPricingRepository
 from gateway.repositories.providers import (
     HostedProviderModelRepository,
+    HostedProviderRegionRepository,
     HostedProviderRepository,
     HostedProviderVendorRepository,
     OrgProviderKeyModelRepository,
@@ -515,6 +516,7 @@ def get_organization_guardrail_definition_service(
         organizations=OrganizationService(db, membership_listener=None),
         uow=uow,
         build_state=organization_guardrail_runner.build_state,
+        build_refusal=organization_guardrail_runner.build_refusal,
         rebuild=organization_guardrail_runner.rebuild_definition,
         handle=organization_guardrail_runner.handle,
     )
@@ -682,11 +684,13 @@ def build_hosted_provider_service(uow: UnitOfWork, *, config: GatewayConfig) -> 
     while offering a model lands in the same transaction as the offer.
     """
     providers = HostedProviderRepository(uow)
+    regions = HostedProviderRegionRepository(uow)
     return HostedProviderService(
         uow,
         config=config,
         providers=providers,
-        sources=HostedSources(config, providers),
+        regions=regions,
+        sources=HostedSources(config, providers, regions),
         models=HostedProviderModelRepository(uow),
         vendors=HostedProviderVendorRepository(uow),
         endpoints=ProviderEndpointRepository(uow),

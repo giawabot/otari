@@ -164,11 +164,10 @@ ENV_BRIDGED_FIELDS = (
     "web_search_max_results",
     "web_search_extract",
     "web_search_allow_private_hosts",
+    "mcp_private_hosts",
     "web_search_default_tool",
     "web_fetch_default_tool",
     "web_search_max_calls",
-    "mcp_allow_loopback",
-    "mcp_allow_private_hosts",
     "provider_allow_private_hosts",
 )
 
@@ -298,7 +297,8 @@ def hosted_provider_name_problem(name: str, provider: str) -> str | None:
     ``name:model`` selector, so it cannot hold the separators a selector splits
     on, and it follows the instance-name rules. Another implementation's name
     is refused, because a request for ``anthropic:...`` must not reach an
-    OpenAI endpoint.
+    OpenAI endpoint. A stored provider is also refused ``@``, which pins a
+    region (``name@region:model``); a configured name holding one keeps loading.
     """
     if name in RESERVED_PROVIDER_INSTANCE_NAMES:
         return "is reserved; give the provider a name of its own"
@@ -313,6 +313,27 @@ def hosted_provider_name_problem(name: str, provider: str) -> str | None:
     if name in {member.value for member in LLMProvider} or name in PROVIDER_TYPE_ALIASES:
         return "names another provider"
     return None
+
+
+# Joins a hosted provider's name and one of its regions in a selector: ``tokenhub@sg:model``.
+REGION_SEPARATOR = "@"
+_REGION_SLUG = re.compile(r"[a-z0-9][a-z0-9-]{0,31}")
+
+
+def region_slug_problem(slug: str) -> str | None:
+    """Why ``slug`` cannot name a hosted provider region, or None when it can.
+
+    It pins the region in a selector, so it keeps to lower-case letters, digits
+    and hyphens, starting with a letter or digit, at most 32 characters.
+    """
+    if _REGION_SLUG.fullmatch(slug) is None:
+        return "must be 1 to 32 lower-case letters, digits or hyphens, starting with a letter or digit"
+    return None
+
+
+def region_instance(name: str, region: str | None) -> str:
+    """The instance name a request served from ``region`` of the hosted provider ``name`` settles under."""
+    return name if region is None else f"{name}{REGION_SEPARATOR}{region}"
 
 
 def hosted_key_optional(provider_type: str, api_base: str | None) -> bool:
@@ -1492,19 +1513,6 @@ class GatewayConfig(
             "False makes code execution something a workspace admin turns on."
         ),
     )
-    mcp_allow_loopback: Annotated[bool, Shown(SettingsGroup.TOOLS)] = Field(
-        default=True,
-        description=(
-            "SSRF gate: allow MCP server URLs that resolve to loopback (useful for same-host sidecars). On by default."
-        ),
-    )
-    mcp_allow_private_hosts: Annotated[bool, Shown(SettingsGroup.TOOLS)] = Field(
-        default=False,
-        description=(
-            "SSRF gate: allow MCP server URLs that resolve to private/reserved hosts, and accept "
-            "hostnames that fail to resolve at validation time. Off by default."
-        ),
-    )
     provider_allow_private_hosts: Annotated[bool, Shown(SettingsGroup.TOOLS)] = Field(
         default=True,
         description=(
@@ -1515,7 +1523,9 @@ class GatewayConfig(
             f"credential write path (POST {API_ROOT}/hosted-providers and PATCH "
             f"{API_ROOT}/hosted-providers/{{provider}}) refuse an internal api_base. "
             "Chat dispatch (which dials the endpoint on every request) is not gated, so this is not a "
-            "general egress control. Also settable via OTARI_PROVIDER_ALLOW_PRIVATE_HOSTS."
+            "general egress control. It governs operator-supplied endpoints only: an organization's "
+            "provider key, an owned provider endpoint and an organization's search key are always held "
+            "to public addresses. Also settable via OTARI_PROVIDER_ALLOW_PRIVATE_HOSTS."
         ),
     )
     provider_endpoints_enabled: Annotated[bool, Shown(SettingsGroup.TOOLS)] = Field(
@@ -2631,6 +2641,7 @@ def load_config(config_path: str | None = None) -> GatewayConfig:
         config_dict.update(structured_env_config)
     _apply_json_env_overrides(config_dict)
     _warn_about_unknown_keys(config_dict)
+    _warn_about_retired_mcp_settings(config_dict)
 
     # Snapshot which bridged fields the YAML config set, before the env
     # overrides below inject OTARI_ values into the same dict: only YAML-set
@@ -2655,6 +2666,28 @@ def load_config(config_path: str | None = None) -> GatewayConfig:
     config.warn_about_half_configured_web_search()
     _bridge_yaml_fields_to_env(config, yaml_bridged_fields)
     return config
+
+
+# Settings that once relaxed the address check for every tenant's MCP URL. They
+# are read by nothing now, so a deployment still setting one is told what replaced it.
+_RETIRED_MCP_SETTINGS = ("mcp_allow_loopback", "mcp_allow_private_hosts")
+
+
+def _warn_about_retired_mcp_settings(config: dict[str, Any]) -> None:
+    """Say so when a removed MCP address setting is still set, in the config file or the environment."""
+    found = [name for name in _RETIRED_MCP_SETTINGS if name in config]
+    found += [
+        f"{OTARI_ENV_PREFIX}{name.upper()}"
+        for name in _RETIRED_MCP_SETTINGS
+        if os.getenv(f"{OTARI_ENV_PREFIX}{name.upper()}") is not None
+    ]
+    if found:
+        logger.warning(
+            "Ignoring %s: MCP server URLs must reach public addresses, and no setting relaxes that for every "
+            "tenant any more. List exact private hosts in mcp_private_hosts (OTARI_MCP_PRIVATE_HOSTS) on a "
+            "single-tenant or trusted deployment.",
+            ", ".join(found),
+        )
 
 
 def _warn_about_unknown_keys(config: dict[str, Any]) -> None:

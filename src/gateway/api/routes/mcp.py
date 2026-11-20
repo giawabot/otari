@@ -114,8 +114,8 @@ from gateway.services.model_access import (
 from gateway.services.secret_box import SecretBoxUnavailableError, SecretDecryptionError
 from gateway.services.tenancy.workspace_mcp_server_service import McpServerSummary, WorkspaceMcpServers
 from gateway.services.tools import McpConnectionService, mcp_server_contacts
-from gateway.services.traces import RequestTrace, harness_of, resolve_session
-from gateway.services.url_safety import UnsafeURLError, validate_mcp_url
+from gateway.services.traces import RequestClient, RequestTrace, resolve_session
+from gateway.services.url_safety import UnsafeURLError, mcp_private_hosts, validate_mcp_url
 from gateway.services.workspace_scope import resolve_workspace_id
 from gateway.types.key_scope import KeyScope
 
@@ -499,9 +499,12 @@ def _begin_trace(
     """Open this call's trace: a step of the caller's session when it names one, as a completion's step is."""
     if not config.trace_capture_enabled:
         return None
+    sender = RequestClient.of(raw_request.headers)
     trace = RequestTrace(
         session=resolve_session(raw_request.headers, session_label=None, tags=None),
-        harness=harness_of(raw_request.headers),
+        harness=sender.harness,
+        client_language=sender.language,
+        client_version=sender.version,
         request_id=raw_request.state.otari_request_id,
         workspace_id=principal.workspace_id,
         user_id=principal.user_id,
@@ -535,7 +538,9 @@ def _record_refusal(
 async def _require_safe_url(server: ResolvedMcpServer) -> None:
     """Run the existing MCP SSRF policy over the resolved URL."""
     try:
-        await validate_mcp_url(server.url, has_authorization_token=bool(server.authorization_token))
+        await validate_mcp_url(
+            server.url, has_authorization_token=bool(server.authorization_token), private_hosts=mcp_private_hosts()
+        )
     except UnsafeURLError:
         raise McpExecutionError(CODE_UNSAFE_URL, ExecutionState.NOT_STARTED, 400) from None
 
