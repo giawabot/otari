@@ -60,6 +60,7 @@ from gateway.api.deps.budgets import (
     build_budget_service,
     get_budget_service,
 )
+from gateway.api.deps.catalog import SelectorReindexDep, get_selector_reindex
 from gateway.api.deps.identity import (
     CurrentIdentity,
     DeploymentAdministrationAccessDep,
@@ -111,6 +112,7 @@ from gateway.api.deps.ports import (
     RequestSessionModelProviderPortDep,
     SignupInvitePortDep,
     TelemetryStoragePortDep,
+    account_country_port_on,
     billing_port_on,
     get_agent_model_recommender_port,
     get_api_key_format_port,
@@ -1232,6 +1234,7 @@ __all__ = [
     "SearchCatalogCallerDep",
     "SearchToolServiceDep",
     "SearchToolTesterDep",
+    "SelectorReindexDep",
     "ServiceKey",
     "SignupInvitePortDep",
     "TRACE_CONTENT_HEADER_INVALID_DETAIL",
@@ -1255,6 +1258,7 @@ __all__ = [
     "WorkspaceServiceDep",
     "WorkspaceWebSearchPoliciesDep",
     "WorkspaceWebSearchServiceDep",
+    "account_country_port_on",
     "asks_to_keep_trace_content",
     "billing_port_on",
     "build_budget_service",
@@ -1318,6 +1322,7 @@ __all__ = [
     "get_search_catalog_caller",
     "get_search_tool_service",
     "get_search_tool_tester",
+    "get_selector_reindex",
     "get_session_identity",
     "get_signup_invite_port",
     "get_telemetry_storage_port",
