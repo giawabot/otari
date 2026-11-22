@@ -1,0 +1,7 @@
+# SPA fallback for Cloudflare Pages. Pages' native fallback (serve index.html
+# when no 404.html exists) proved unreliable in production: deep links like
+# /keys and /reset-password came back as empty 404s, which breaks every
+# password-reset and verification link built from ui_base_url. This explicit
+# catch-all makes the fallback deterministic. Static assets take precedence
+# over _redirects rules, so only unmatched paths are rewritten.
+/*  /index.html  200
