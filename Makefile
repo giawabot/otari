@@ -35,6 +35,12 @@ dev:
 dashboard: web/node_modules/.install-stamp
 	pnpm --dir web run build
 
+# Zip the built dashboard for a Cloudflare Pages deploy: adds the generated
+# 404.html SPA fallback and dashboard-build.json (see scripts/ header for why
+# _redirects is not usable on Pages).
+dashboard-pages: dashboard
+	python scripts/package_dashboard_pages.py northrouter-dashboard.zip
+
 # Reinstalling on every rebuild is the wrong price to pay now that the READMEs
 # send developers to `make dashboard` to see the dashboard locally. Gate it on a
 # stamp of our own rather than on one of pnpm's metadata files: pnpm writes both
