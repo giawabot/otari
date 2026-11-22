@@ -4,4 +4,4 @@
 # password-reset and verification link built from ui_base_url. This explicit
 # catch-all makes the fallback deterministic. Static assets take precedence
 # over _redirects rules, so only unmatched paths are rewritten.
-/*  /index.html  200
+/* /index.html 200
