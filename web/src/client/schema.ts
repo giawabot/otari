@@ -3263,7 +3263,10 @@ export interface paths {
          *     request sends as `model` to let the gateway choose the provider: it tries the
          *     model's offerings best first and falls back down the list. An entry's price,
          *     token limits and capabilities are those of the offering tried first, at the
-         *     caller's own rate. A value nobody knows is omitted rather than sent as null.
+         *     caller's own rate; a token limit that offering does not know is the smallest
+         *     the model's other offerings report, and an output limit filled that way is
+         *     capped at the entry's context window. A value nobody knows is omitted rather
+         *     than sent as null.
          *
          *     Aliases and routing policies are listed beside the models. An
          *     `instance:model` selector still pins a request to one provider, and
@@ -21155,6 +21158,20 @@ export interface components {
             [key: string]: unknown;
         };
         /**
+         * RotateMasterKeyRequest
+         * @description The proof a session-authenticated master-key rotation has to supply.
+         *
+         *     Only read when the caller authenticated with the dashboard session cookie. A request
+         *     carrying the master key is the deployment credential already, so it needs no further proof.
+         */
+        RotateMasterKeyRequest: {
+            /**
+             * Current Password
+             * @description The caller's current password. Required for a session-authenticated rotation.
+             */
+            current_password?: string | null;
+        };
+        /**
          * RotateMasterKeyResponse
          * @description A newly generated dashboard master key, returned once.
          */
@@ -37321,7 +37338,11 @@ export interface operations {
             path?: never;
             cookie?: never;
         };
-        requestBody?: never;
+        requestBody?: {
+            content: {
+                "application/json": components["schemas"]["RotateMasterKeyRequest"] | null;
+            };
+        };
         responses: {
             /** @description Successful Response */
             200: {
@@ -37330,6 +37351,15 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["RotateMasterKeyResponse"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
                 };
             };
         };

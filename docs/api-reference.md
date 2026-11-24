@@ -122,7 +122,12 @@ through `extra_body={"input_type": "search_query"}`.
 a chat completion and translates the answer back, streamed or not, so the client
 sees an ordinary Responses object or event stream. A provider with its own
 Responses API (OpenAI, Azure OpenAI, Gemini, Groq, and others) is called
-natively.
+natively. When such a provider refuses one model with a `400` saying the model does
+not support the Responses API (Nebius does this for some models), Otari serves that
+same request as a chat completion on the same provider. That is still one attempt:
+`Otari-Attempt-Count` stays `1` and `Otari-Fallback` stays `false`. A request the
+translation cannot carry (for example one with `previous_response_id`) gets the
+provider's `400` instead, and so does a `400` that names a request field.
 
 The translation covers text, image and file input, `instructions`, function
 tools and `tool_choice`, `max_output_tokens`, `reasoning.effort`, JSON output
@@ -1285,6 +1290,8 @@ at the top level of the body.
 | `pricing_required` | 402 | `require_pricing` is on and the model resolves but has no price, a direct search has no price (see [Search](#search)), or a gateway-run tool the request declares has no row to price its calls ([Tools](tools.md#pricing-a-gateway-run-tool)). An unpriced model whose provider has no credential answers `provider_not_configured` instead | |
 | `provider_not_configured` | 424 | Nothing declares the model's provider, or its declaration names no key the provider needs, so nothing was sent upstream. Not a 5xx, so a client does not retry it: an operator adds the provider as a [hosted provider](hosted-providers.md) (switching on the model), or the organization adds its own provider key. A provider's environment variable alone serves nothing | |
 | `provider_credential_rejected` | 424 | The provider refused the credential the gateway holds for it (an upstream 401, or a 403 other than one rejecting the request, which is a 400). It is the gateway's key, not the caller's, so it is never a 401 or 403; and not a 5xx, because no retry makes the key valid. Replace or fix the provider credential. The usage row keeps the provider's own status. A routing policy moves on to its next candidate first, and answers with this code when every candidate either had no credential or had it rejected, and at least one was rejected | |
+| `guardrail_not_configured` | 424 | A `block` guardrail that fails closed has no guardrails service configured for its profile (the entry names no `url` and the deployment has no `guardrails_url`), so the request was refused unchecked. Not a 5xx, so a client does not retry it. `detail` says what to change: for a profile the request named, a `url` on its entry or removing the entry; for a mandated one, an administrator configuring it. See [Guardrails](guardrails-reference.md#when-the-guardrails-service-is-unreachable) | `Otari-Guardrails`, with `reason: not_configured` |
+| `guardrail_unavailable` | 502 | A `block` guardrail that fails closed could not be evaluated for any other reason (its service failed, answered something malformed or gave no verdict, or its guardrail definition could not run), so the request was refused unchecked. `detail` names the profile and nothing about its endpoint | `Otari-Guardrails`, whose `reason` says why: `http_<status>` or `evaluation_failed` |
 | `end_user_budget_not_allowed` | 403 | A service key named an end-user budget that is not on its `end_user_budget_ids` | |
 | `end_user_budget_without_end_user` | 400 | The request sent `Otari-End-User-Budget` but its `user` field (`metadata.user_id` on Messages) names no end user of a service key (the key is not a service key, or the request names no one or the key's own user), so the budget would apply to no one | |
 | `end_user_limit_reached` | 403 | A service key already has as many end users as its `max_end_users` allows, so a request that would create a new end user or revive a deleted one is refused. End users it already has are unaffected | |
