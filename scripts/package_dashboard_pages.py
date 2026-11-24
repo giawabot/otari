@@ -43,7 +43,6 @@ def gateway_version() -> str:
     return os.environ.get("OTARI_VERSION") or "0.0.0-dev"
 
 
-
 def main() -> None:
     out_zip = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(DEFAULT_ZIP)
     dashboard_out = Path(sys.argv[2]) if len(sys.argv) > 2 else DEFAULT_DASHBOARD_OUT
