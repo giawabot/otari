@@ -216,6 +216,20 @@ def decrypt_secret(ciphertext: str) -> str:
         ) from None
 
 
+def reencrypted(ciphertext: str | None) -> str | None:
+    """``ciphertext`` decrypted and encrypted again under the primary key, or None for None.
+
+    Here rather than beside one store's rows, because every store that holds a
+    ciphertext has to re-seal it after the primary key changes, and each one
+    writing its own would be the same arithmetic in several places.
+
+    Raises:
+        SecretDecryptionError: no configured key reads it.
+        SecretBoxUnavailableError: no usable ``OTARI_SECRET_KEY``.
+    """
+    return None if ciphertext is None else encrypt_secret(decrypt_secret(ciphertext))
+
+
 def encrypt_mapping(values: Mapping[str, Any] | None) -> str | None:
     """Encrypt a settings mapping for storage, as one JSON document. None stays None."""
     if values is None:
@@ -232,3 +246,16 @@ def decrypt_mapping(ciphertext: str | None) -> dict[str, Any] | None:
         return None
     values: dict[str, Any] = json.loads(decrypt_secret(ciphertext))
     return values
+
+
+def readable_mapping(ciphertext: str | None) -> dict[str, Any] | None:
+    """The settings mapping a stored ciphertext holds, or None when no configured key reads it.
+
+    For reporting on a row rather than serving it: a listing names a row whose
+    secret has moved instead of failing, so a decryption that cannot be done
+    reads as nothing stored.
+    """
+    try:
+        return decrypt_mapping(ciphertext)
+    except (SecretBoxUnavailableError, SecretDecryptionError):
+        return None

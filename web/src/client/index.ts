@@ -344,6 +344,8 @@ export type KnownProviderSummary = Schemas["KnownProviderSummarySchema"]
 // tenant and every workspace in it inherits it. The deployment's own keys are
 // `HostedProvider` below.
 export type OrgProviderKey = Schemas["OrgProviderKeyPublic"]
+// The credential an edge proxy in front of a key's own address requires.
+export type EndpointAuth = Schemas["EndpointAuthPublic"]
 // No alias for the list wrapper: this surface is read through `fetchAllPaged`,
 // which types the envelope itself, so a name for it would have no consumer.
 export type CreateOrgProviderKeyRequest = Schemas["OrgProviderKeyCreateRequest"]
@@ -668,6 +670,9 @@ export type AcceptInvitationRequest = Defaulted<
   "terms_accepted"
 >
 export type AcceptInvitationResult = Schemas["AcceptInvitationResultPublic"]
+// Accepting from the invitee's own inbox answers the membership alone: that
+// caller is already signed in, so there is no next step to carry.
+export type AcceptedMembership = Schemas["AcceptedMembershipPublic"]
 
 // The invitee's side of the same flow: what is waiting on the signed-in
 // identity, rather than what this organization has sent out. Addressed by

@@ -28,6 +28,7 @@ from gateway.services.secret_box import (
     decrypt_secret,
     encrypt_mapping,
     encrypt_secret,
+    readable_mapping,
 )
 from gateway.services.url_safety import redact_url_secrets
 
@@ -296,19 +297,6 @@ def region_decryptable(region: HostedProviderRegion) -> bool:
     return True
 
 
-def reencrypted(ciphertext: str | None) -> str | None:
-    """``ciphertext`` decrypted and encrypted again under the primary key, or None for None.
-
-    Raises:
-        SecretDecryptionError: no configured key reads it.
-        SecretBoxUnavailableError: no usable ``OTARI_SECRET_KEY``.
-    """
-    return None if ciphertext is None else encrypt_secret(decrypt_secret(ciphertext))
-
-
 def client_args_of(row: HostedProvider | HostedProviderRegion) -> dict[str, Any] | None:
     """The stored SDK client extras, or None when there are none or no configured key reads them."""
-    try:
-        return decrypt_mapping(row.encrypted_client_args)
-    except (SecretDecryptionError, SecretBoxUnavailableError):
-        return None
+    return readable_mapping(row.encrypted_client_args)
