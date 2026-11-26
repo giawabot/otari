@@ -91,7 +91,7 @@ from gateway.log_config import logger
 from gateway.model_labeling import relabel_model
 from gateway.models.api_keys import APIKey
 from gateway.models.pricing import ModelPricing
-from gateway.models.usage import UsageLog
+from gateway.models.usage import DECISIONS_ENDPOINT, UsageLog
 from gateway.ports.billing_port import FUNDS_CHECK_UNAVAILABLE_DETAIL, NO_TOOLS, BillingPort, InsufficientFundsError
 from gateway.ports.model_provider_port import HostedAccessDeniedError, ModelProviderPort
 from gateway.rate_limit import check_rate_limit, open_rate_limit_grant, rate_limit_headers
@@ -489,6 +489,7 @@ async def run_passthrough(
                 api_key_id=api_key_id,
                 user_id=api_key.user_id,
                 model=model,
+                requested_model=model,
                 provider=None,
                 endpoint=endpoint,
                 detail=str(exc.detail),
@@ -518,6 +519,7 @@ async def run_passthrough(
             api_key_id=api_key_id,
             user_id=user_id,
             model=row_model,
+            requested_model=model,
             provider=row_provider,
             endpoint=endpoint,
             detail=detail,
@@ -980,6 +982,7 @@ async def run_passthrough(
             user_id=user_id,
             timestamp=datetime.now(UTC),
             model=resolved.model,
+            requested_model=model,
             provider=resolved.instance,
             endpoint=endpoint,
             status=row_status,
@@ -1198,9 +1201,6 @@ def _billable_tokens(reported: ReportedUsage) -> BillableUsage | None:
     )
 
 
-DECISIONS_ENDPOINT = "/v1/decisions"
-"""The usage-log label for every decisions path. See chat.USAGE_ENDPOINT."""
-
 # An answer is a handful of tokens (one label, or a number), so the reservation
 # holds this many output tokens per question rather than a completion's default.
 ESTIMATED_OUTPUT_TOKENS_PER_QUESTION = 32
@@ -1245,6 +1245,19 @@ class DecisionOutcome(Generic[ResultT]):
     output_tokens: int
     charge: Decimal | None = None
     """The final price where the call names one. ``None`` prices the tokens, or settles the quote."""
+
+
+@dataclass(frozen=True)
+class DecisionSettled(Generic[ResultT]):
+    """A decision call that was answered and settled, and whom it was settled against."""
+
+    result: ResultT
+    request_id: str
+    """The id the call's usage row carries as ``request_group_id``."""
+    workspace_id: uuid.UUID
+    user_id: str
+    cost: Decimal | None
+    """What the caller was charged. ``None`` where the call had no price."""
 
 
 class DecisionUnavailableError(Exception):
@@ -1387,7 +1400,7 @@ async def run_decision(
     prompt_chars: int,
     default_output_tokens: int,
     call: DecisionCall[ResultT],
-) -> ResultT:
+) -> DecisionSettled[ResultT]:
     """Run the decisions scaffold around ``call``: resolve, gate, reserve, call, log, settle.
 
     The same steps as :func:`run_passthrough`, which cannot run them: it resolves the model
@@ -1421,6 +1434,7 @@ async def run_decision(
                 api_key_id=api_key_id,
                 user_id=api_key.user_id,
                 model=selector,
+                requested_model=selector,
                 provider=None,
                 endpoint=DECISIONS_ENDPOINT,
                 detail=str(exc.detail),
@@ -1439,6 +1453,7 @@ async def run_decision(
             api_key_id=api_key_id,
             user_id=user_id,
             model=row_model,
+            requested_model=selector,
             provider=row_provider,
             endpoint=DECISIONS_ENDPOINT,
             detail=detail,
@@ -1576,6 +1591,7 @@ async def run_decision(
             user_id=user_id,
             timestamp=datetime.now(UTC),
             model=model,
+            requested_model=selector,
             provider=provider_name,
             endpoint=DECISIONS_ENDPOINT,
             latency_ms=_elapsed_ms(started_at),
@@ -1670,7 +1686,9 @@ async def run_decision(
     if rate_limit_info:
         for header, value in rate_limit_headers(rate_limit_info).items():
             response.headers[header] = value
-    return outcome.result
+    return DecisionSettled(
+        result=outcome.result, request_id=request_id, workspace_id=workspace_id, user_id=user_id, cost=cost
+    )
 
 
 @dataclass(frozen=True)
@@ -1692,7 +1710,7 @@ class DecisionScaffold:
     ) -> DecisionResponse:
         """Run the scaffold for one decisions request, against the provider its selector names."""
         call = SelectorDecision(self.config, request)
-        return await self.run_call(
+        settled = await self.run_call(
             raw_request=raw_request,
             response=response,
             auth_result=auth_result,
@@ -1702,6 +1720,7 @@ class DecisionScaffold:
             default_output_tokens=call.default_output_tokens,
             call=call,
         )
+        return settled.result
 
     async def run_call(
         self,
@@ -1714,7 +1733,7 @@ class DecisionScaffold:
         prompt_chars: int,
         default_output_tokens: int,
         call: DecisionCall[ResultT],
-    ) -> ResultT:
+    ) -> DecisionSettled[ResultT]:
         """Run the scaffold around ``call``, with ``selector`` as the name a refusal reports."""
         return await run_decision(
             raw_request=raw_request,

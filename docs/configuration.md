@@ -92,6 +92,7 @@ the corresponding startup value after the database is available.
 | `mcp_catalog_enabled` | Offer the MCP server catalog. Defaults to `true`; startup setting. See [MCP server catalog](mcp-catalog.md). |
 | `mcp_catalog_sync` | Whether Otari copies the MCP Registry into the catalog: `off`, `manual` (the default, loaded from **Browse catalog**), or `scheduled`. `off` suits a deployment with no outbound access. |
 | `mcp_catalog_sync_interval_hours` | Hours between syncs when `mcp_catalog_sync` is `scheduled`, from 1 to 720. Defaults to 24. |
+| `organization_oidc_enabled` | Offer organizations their own OIDC sign-in connection: the **Single sign-on** page and its routes. Defaults to `true`; startup setting. `false` removes both, so no organization can configure a connection or sign in through one. Stored connections are kept. See [Single sign-on](sso.md). |
 | `public_catalog` | Serve the model catalog to visitors without a session. Defaults to `false`. |
 | `public_catalog_rate_limit_per_minute` | Anonymous catalog reads per client address per minute. Defaults to 60. |
 | `rate_limit_rpm` | Per-user request limit. Unset disables it. |
@@ -1760,6 +1761,17 @@ With `mail_transport: smtp`, Otari does not start when `mail_from_email` is anyt
 Those messages can contain invitation or password-reset tokens, so never use it
 where logs are shared. Test delivery from Settings or
 `POST /api/v1/settings/mail/test`.
+
+Nothing reaches a recipient on that transport, so anything whose outcome depends
+on somebody receiving the message behaves as it does with no mail at all. An
+invitation hands its accept link back, a password link is shown instead of
+emailed, and health check alerts tell nobody. Signing up without an invitation,
+a verification resend and a password reset need `public_base_url` as well, and
+are refused without it. With it set they are accepted, because their message is
+written to the log for an operator to pass on, and the page that follows says to
+ask for the link rather than to watch an inbox. Signing up from an invitation is
+accepted either way, because the invitation names the address and the account
+needs no verification link.
 
 ### Invitations
 

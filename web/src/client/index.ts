@@ -34,6 +34,7 @@ export type Defaulted<T, K extends keyof T> = Omit<T, K> & Partial<Pick<T, K>>
 // knows whether it can authenticate at all.
 // ---------------------------------------------------------------------------
 export type DeploymentBootstrap = Schemas["DeploymentBootstrap"]
+export type MailReadiness = Schemas["MailReadiness"]
 
 // ---------------------------------------------------------------------------
 // Dashboard sign-in credentials
@@ -440,6 +441,15 @@ export type AgentRecommender = Schemas["AgentRecommenderPublic"]
 export type AgentRecommenders = Schemas["AgentRecommendersPublic"]
 export type CreateAgentRecommenderRequest = Schemas["AgentRecommenderCreate"]
 export type UpdateAgentRecommenderRequest = Schemas["AgentRecommenderUpdate"]
+
+// What the subagent router saved: the tokens routed subagents consumed, priced
+// at the models they ran on and at the models they would have started on.
+export type SubagentSavings = Schemas["SubagentSavingsPublic"]
+export type SavingsAmounts = Schemas["SavingsAmounts"]
+export type SubagentSavingsTotals = Schemas["SubagentSavingsTotals"]
+export type SubagentSavingsPoint = Schemas["SubagentSavingsPoint"]
+export type SavingsByAgentType = Schemas["SavingsByAgentType"]
+export type SavingsBySwap = Schemas["SavingsBySwap"]
 export type HostedModels = Schemas["HostedModelsPublic"]
 export type CreateHostedModelRequest = Schemas["HostedModelCreateRequest"]
 export type UpdateHostedModelRequest = Schemas["HostedModelUpdateRequest"]

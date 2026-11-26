@@ -117,6 +117,7 @@ from gateway.api.routes._tools import (
 from gateway.api.trace_capture import begin_request_trace
 from gateway.core.config import (
     ATTEMPT_COUNT_HEADER,
+    DEPLOYMENT_PAID_HEADER,
     END_USER_BUDGET_HEADER,
     FALLBACK_HEADER,
     MODEL_HEADER,
@@ -790,8 +791,11 @@ class RequestContext:
         residency: str | None = None,
         residency_source: str = "none",
         sovereignty_map: SovereigntyMap | None = None,
+        requested_model: str | None = None,
     ) -> None:
         self.config = config
+        # The model name as the caller sent it, before an alias or a policy resolved it.
+        self.requested_model = requested_model
         # The key that authenticated the request; ``None`` for the master key and a session principal.
         self.api_key = api_key
         # Whether a dashboard session (the Playground) made the request, which MCP access binds as its user.
@@ -947,6 +951,7 @@ def _served_by_headers(
     opening for a streamed one.
     """
     fell_back = chosen is not None and ctx.plan is not None and ctx.plan.is_fallback(chosen)
+    deployment_paid = chosen.deployment_paid if chosen is not None else ctx.deployment_paid
     headers = {PROVIDER_HEADER: provider_key(provider)}
     # A plain request's model is the caller's own string, and one a provider accepted
     # but a header cannot carry would fail the response after the provider answered.
@@ -959,6 +964,7 @@ def _served_by_headers(
         | {
             ATTEMPT_COUNT_HEADER: str(sent),
             FALLBACK_HEADER: "true" if fell_back else "false",
+            DEPLOYMENT_PAID_HEADER: "true" if deployment_paid else "false",
             RESPONSE_DURATION_HEADER: str(round((now - ctx.started_at) * 1000)),
         }
         | _server_timing(ctx, now)
@@ -1108,6 +1114,7 @@ async def resolve_dispatch_provider(
             api_key_id=ctx.api_key_id,
             user_id=ctx.user_id,
             model=model_selector,
+            requested_model=ctx.requested_model,
             provider=None,
             endpoint=adapter.endpoint,
             detail=unresolvable_model_detail(model_selector),
@@ -1182,6 +1189,7 @@ async def _refuse_if_hosted_model_switched_off(
         api_key_id=ctx.api_key_id,
         user_id=ctx.user_id,
         model=resolved.model,
+        requested_model=ctx.requested_model,
         provider=resolved.instance,
         endpoint=adapter.endpoint,
         detail=detail,
@@ -1230,6 +1238,7 @@ async def _refuse_if_model_unknown(
         api_key_id=ctx.api_key_id,
         user_id=ctx.user_id,
         model=resolved.model,
+        requested_model=ctx.requested_model,
         provider=resolved.instance,
         endpoint=adapter.endpoint,
         detail=refusal.detail,
@@ -1269,6 +1278,7 @@ async def _hold_at_deployment_paid_rate(
             api_key_id=ctx.api_key_id,
             user_id=ctx.user_id,
             model=served.model,
+            requested_model=ctx.requested_model,
             provider=served.instance,
             endpoint=adapter.endpoint,
             detail=detail,
@@ -1433,6 +1443,7 @@ async def _record_funding_refusal(
         api_key_id=ctx.api_key_id,
         user_id=ctx.user_id,
         model=resolved.model,
+        requested_model=ctx.requested_model,
         provider=resolved.instance,
         endpoint=adapter.endpoint,
         detail=detail,
@@ -1460,6 +1471,7 @@ async def _provider_not_configured(
         api_key_id=ctx.api_key_id,
         user_id=ctx.user_id,
         model=resolved.model,
+        requested_model=ctx.requested_model,
         provider=resolved.instance,
         endpoint=adapter.endpoint,
         detail=missing.detail,
@@ -1719,6 +1731,7 @@ async def _serve_from_hosted_credential(
             api_key_id=ctx.api_key_id,
             user_id=ctx.user_id,
             model=resolved.model,
+            requested_model=ctx.requested_model,
             provider=resolved.instance,
             endpoint=adapter.endpoint,
             detail=denied_detail,
@@ -1759,6 +1772,7 @@ async def _serve_from_hosted_credential(
             api_key_id=ctx.api_key_id,
             user_id=ctx.user_id,
             model=resolved.model,
+            requested_model=ctx.requested_model,
             provider=resolved.instance,
             endpoint=adapter.endpoint,
             detail=HOSTED_CREDENTIAL_UNUSABLE_DETAIL,
@@ -1788,6 +1802,7 @@ async def _serve_from_hosted_credential(
             api_key_id=ctx.api_key_id,
             user_id=ctx.user_id,
             model=resolved.model,
+            requested_model=ctx.requested_model,
             provider=resolved.instance,
             endpoint=adapter.endpoint,
             detail=detail,
@@ -1821,6 +1836,7 @@ async def _serve_from_hosted_credential(
             api_key_id=ctx.api_key_id,
             user_id=ctx.user_id,
             model=resolved.model,
+            requested_model=ctx.requested_model,
             provider=resolved.instance,
             endpoint=adapter.endpoint,
             detail=HOSTED_CREDENTIAL_UNUSABLE_DETAIL,
@@ -2347,6 +2363,7 @@ async def _compile_request_plan(
             api_key_id=api_key_id,
             user_id=user_id,
             model=model,
+            requested_model=model,
             provider=None,
             endpoint=endpoint,
             detail=exc.operator_detail,
@@ -2438,6 +2455,7 @@ async def _resolve_keyed_user_id(
                 api_key_id=api_key_id,
                 user_id=api_key.user_id,
                 model=model,
+                requested_model=model,
                 provider=None,
                 endpoint=adapter.endpoint,
                 detail=user_forbidden_detail,
@@ -2799,6 +2817,7 @@ async def resolve_request_context(
             api_key_id=api_key_id,
             user_id=user_id,
             model=gate_model,
+            requested_model=model,
             provider=gate_instance,
             endpoint=adapter.endpoint,
             detail=key_refusal.detail,
@@ -2840,6 +2859,7 @@ async def resolve_request_context(
                 api_key_id=api_key_id,
                 user_id=user_id,
                 model=gate_model,
+                requested_model=model,
                 provider=gate_instance,
                 endpoint=adapter.endpoint,
                 detail=refusal.detail,
@@ -2888,6 +2908,7 @@ async def resolve_request_context(
             api_key_id=api_key_id,
             user_id=user_id,
             model=gate_model,
+            requested_model=model,
             provider=gate_instance,
             endpoint=adapter.endpoint,
             detail=wrong_type,
@@ -2916,6 +2937,7 @@ async def resolve_request_context(
             api_key_id=api_key_id,
             user_id=user_id,
             model=gate_model,
+            requested_model=model,
             provider=gate_instance,
             endpoint=adapter.endpoint,
             detail=detail,
@@ -2939,6 +2961,7 @@ async def resolve_request_context(
                     api_key_id=api_key_id,
                     user_id=user_id,
                     model=gate_model,
+                    requested_model=model,
                     provider=gate_instance,
                     endpoint=adapter.endpoint,
                     detail=str(exc.detail),
@@ -3076,6 +3099,7 @@ async def resolve_request_context(
                 api_key_id=api_key_id,
                 user_id=user_id,
                 model=gate_model,
+                requested_model=model,
                 provider=gate_instance,
                 endpoint=adapter.endpoint,
                 detail=str(exc.detail),
@@ -3095,6 +3119,7 @@ async def resolve_request_context(
             api_key_id=api_key_id,
             user_id=user_id,
             model=gate_model,
+            requested_model=model,
             provider=None,
             endpoint=adapter.endpoint,
             detail=unresolved.detail,
@@ -3137,6 +3162,7 @@ async def resolve_request_context(
             api_key_id=api_key_id,
             user_id=user_id,
             model=gate_model,
+            requested_model=model,
             provider=gate_instance,
             endpoint=adapter.endpoint,
             detail=refusal.detail,
@@ -3290,6 +3316,7 @@ async def resolve_request_context(
                 api_key_id=api_key_id,
                 user_id=user_id,
                 model=gate_model,
+                requested_model=model,
                 provider=gate_instance,
                 endpoint=adapter.endpoint,
                 detail=detail,
@@ -3393,6 +3420,7 @@ async def resolve_request_context(
         residency=residency,
         residency_source=residency_source,
         sovereignty_map=sovereignty_map,
+        requested_model=model,
     )
 
 
@@ -4389,6 +4417,7 @@ async def _refuse_tool_funding(
         api_key_id=ctx.api_key_id,
         user_id=ctx.user_id,
         model=tool_key,
+        requested_model=ctx.requested_model,
         provider=GATEWAY_TOOL_PRICING_PROVIDER,
         endpoint=adapter.endpoint,
         detail=detail,
@@ -4758,6 +4787,7 @@ async def _log_unpriced_tool_rejection(adapter: FormatAdapter[Any, Any], ctx: Re
         api_key_id=ctx.api_key_id,
         user_id=ctx.user_id,
         model=model,
+        requested_model=ctx.requested_model,
         provider=provider,
         endpoint=adapter.endpoint,
         detail=unpriced_tool_detail(tool.name, rate_key, enrichment=tool.enrichment),
@@ -4944,6 +4974,7 @@ async def record_usage(
     stream_cut_by: StreamCutBy | None = None,
     answered: bool = False,
     residency_audit: dict[str, Any] | None = None,
+    requested_model: str | None = None,
 ) -> LoggedUsage:
     """Log API usage to the database and return the computed cost and its source.
 
@@ -5017,6 +5048,9 @@ async def record_usage(
             the provider reports, never the one the request asked for.
         answered: The provider answered in full and ``error`` is the gateway's
             refusal of the answer, so the call is billed and counted as a success.
+        requested_model: The model name the caller sent
+            (``RequestContext.requested_model``), stored as-is; None where the
+            row bills something other than the model the caller named.
 
     Returns:
         The computed cost for this request, or None when usage/pricing is absent,
@@ -5048,6 +5082,7 @@ async def record_usage(
         tags=tags,
         deployment_paid=deployment_paid,
         source_label=source_label,
+        requested_model=requested_model,
         safety_identifier=safety_identifier,
         residency_audit=residency_audit,
     )
@@ -5486,6 +5521,7 @@ async def log_gateway_rejection(
     request_id: str | None = None,
     tags: dict[str, str] | None = None,
     safety_identifier: str | None = None,
+    requested_model: str | None = None,
 ) -> None:
     """Record a request the gateway itself refused before any provider was called.
 
@@ -5559,6 +5595,7 @@ async def log_gateway_rejection(
             tags=tags,
             safety_identifier=safety_identifier,
             upstream_attempt=False,
+            requested_model=requested_model,
         )
     except Exception:
         # Deliberately broad, and deliberately not re-raised: see the docstring.
@@ -5615,6 +5652,7 @@ async def _log_failure_and_refund(
         request_id=ctx.request_id,
         tags=ctx.tags,
         source_label=ctx.source_label,
+        requested_model=ctx.requested_model,
         safety_identifier=ctx.upstream_user,
         prices=ctx.prices,
         deployment_paid=ctx.deployment_charge is not None,
@@ -6099,6 +6137,7 @@ def build_streaming_response(
     residency: str | None = None,
     residency_source: str = "none",
     sovereignty_map: SovereigntyMap | None = None,
+    requested_model: str | None = None,
 ) -> StreamingResponse:
     """Wrap an already-opened upstream stream in an SSE response.
 
@@ -6208,6 +6247,7 @@ def build_streaming_response(
             request_id=request_id,
             tags=tags,
             source_label=source_label,
+            requested_model=requested_model,
             safety_identifier=safety_identifier,
             prices=prices,
             deployment_paid=deployment_paid,
@@ -6258,6 +6298,7 @@ def build_streaming_response(
                 request_id=request_id,
                 tags=tags,
                 source_label=source_label,
+                requested_model=requested_model,
                 safety_identifier=safety_identifier,
                 prices=prices,
                 deployment_paid=deployment_paid,
@@ -6287,6 +6328,7 @@ def build_streaming_response(
                 request_id=request_id,
                 tags=tags,
                 source_label=source_label,
+                requested_model=requested_model,
                 safety_identifier=safety_identifier,
                 deployment_paid=deployment_paid,
                 residency_audit=_audit(),
@@ -6325,6 +6367,7 @@ def build_streaming_response(
                 request_id=request_id,
                 tags=tags,
                 source_label=source_label,
+                requested_model=requested_model,
                 safety_identifier=safety_identifier,
                 deployment_paid=deployment_paid,
                 residency_audit=_audit(),
@@ -6426,6 +6469,7 @@ def build_streaming_response(
             request_id=request_id,
             tags=tags,
             source_label=source_label,
+            requested_model=requested_model,
             safety_identifier=safety_identifier,
             prices=prices,
             deployment_paid=deployment_paid,
@@ -6491,6 +6535,7 @@ def build_streaming_response(
                 request_id=request_id,
                 tags=tags,
                 source_label=source_label,
+                requested_model=requested_model,
                 safety_identifier=safety_identifier,
                 prices=prices,
                 deployment_paid=deployment_paid,
@@ -6985,6 +7030,7 @@ async def run_single_attempt_stream(
         tool_tally=tool_ctx.tally,
         tags=ctx.tags,
         source_label=ctx.source_label,
+        requested_model=ctx.requested_model,
         safety_identifier=ctx.upstream_user,
         tool_loop=served_tools.use_tool_loop,
         deployment_charge=ctx.deployment_charge,
@@ -7119,6 +7165,7 @@ async def log_exhausted_plan(
         workspace_id=ctx.workspace_id,
         tags=ctx.tags,
         source_label=ctx.source_label,
+        requested_model=ctx.requested_model,
         safety_identifier=ctx.upstream_user,
         residency_audit=_residency_audit(
             ctx.residency, ctx.residency_source, ctx.sovereignty_map, last.instance, last.model
@@ -7230,6 +7277,7 @@ async def _log_absorbed_row(
             workspace_id=ctx.workspace_id,
             tags=ctx.tags,
             source_label=ctx.source_label,
+            requested_model=ctx.requested_model,
             safety_identifier=ctx.upstream_user,
         )
     except Exception:
@@ -7420,6 +7468,7 @@ async def run_non_stream(
                 status_code=refused.status_code if refused is not None else None,
                 answered=refused is not None,
                 latency_ms=_elapsed_ms(ctx.started_at),
+                requested_model=ctx.requested_model,
                 counts_toward_budget=_handle_counts_toward_budget(ctx.reservation),
                 attribution=attribution,
                 tool_tally=tool_ctx.tally,

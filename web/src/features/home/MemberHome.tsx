@@ -28,7 +28,9 @@ import { hasProviderSlot, ProviderSlot } from "@/features/home/ProviderSlot"
 import { ShareCell } from "@/features/home/ShareCell"
 import { useCanCreateKey } from "@/features/organization/access"
 import { useCurrentOwner } from "@/features/organization/attribution"
+import { RouterSavingsTile } from "@/features/routerSavings/RouterSavingsTile"
 import { wholePct } from "@/features/spend/limits"
+import { paidSplitLine } from "@/features/spend/paidSplit"
 import {
   comparedWith,
   DEFAULT_PERIOD,
@@ -469,13 +471,14 @@ export function MemberHome({
             ) : undefined
           }
           subline={
-            delta !== null
+            paidSplitLine(spend.totals) ||
+            (delta !== null
               ? undefined
               : !spend.totals
                 ? unreadLine
                 : requestCount > 0
                   ? `${formatNumber(requestCount)} requests`
-                  : "No requests yet"
+                  : "No requests yet")
           }
           graphic={slot(
             spend.series.length > 1 ? (
@@ -533,7 +536,8 @@ export function MemberHome({
             !spend.totals
               ? unreadLine
               : cacheTotals.input > 0
-                ? `${formatPct(cacheTotals.read / cacheTotals.input)} of input from cache`
+                ? // The split took the request count off the Spent tile.
+                  `${paidSplitLine(spend.totals) ? `${formatNumber(requestCount)} requests · ` : ""}${formatPct(cacheTotals.read / cacheTotals.input)} of input from cache`
                 : requestCount > 0
                   ? `${formatNumber(requestCount)} requests`
                   : "No requests yet"
@@ -595,6 +599,12 @@ export function MemberHome({
           />
         )}
       </KpiStrip>
+      <RouterSavingsTile
+        window={window}
+        workspaceId={workspaceId}
+        userId={me}
+        isEnabled={me !== undefined}
+      />
       <section aria-label="Where it went" className="flex flex-col gap-4">
         <div className="flex flex-wrap items-center gap-x-5 gap-y-3">
           <h2 className="text-title">Where it went</h2>
