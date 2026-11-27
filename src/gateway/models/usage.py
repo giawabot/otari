@@ -264,6 +264,7 @@ class UsageLog(Base):
     api_key = relationship("APIKey", back_populates="usage_logs")
     user = relationship("User", back_populates="usage_logs")
 
+
 class AgentTelemetry(Base):
     """Content-free outcome metrics and behavioral events from coding agents."""
 
