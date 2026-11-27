@@ -1757,6 +1757,30 @@ smtp_password: ${SMTP_PASSWORD}
 `mail_from_name` sets the name shown beside it.
 With `mail_transport: smtp`, Otari does not start when `mail_from_email` is anything else.
 
+For local development, Docker Compose carries a mail sink. It accepts messages and delivers them to
+nobody, holding each one in a web inbox instead:
+
+```bash
+docker compose --profile mail up -d mailpit
+```
+
+Then point `config.yml` at it, and read what arrives at `http://localhost:8025`:
+
+```yaml
+public_base_url: "http://localhost:8000"
+mail_transport: smtp
+smtp_host: "mailpit"
+smtp_port: 1025
+smtp_tls: false
+mail_from_email: "otari@example.com"
+```
+
+The host is `mailpit` for a gateway in the same Compose network, and `localhost` on the mapped port
+for one running beside it, which is what `.env.example` carries as `OTARI_` variables. The sink holds
+every message in a temporary database inside its container, which goes when the container does, and
+it accepts any credential. So it belongs in development and never in a deployment that serves
+anybody.
+
 `mail_transport: console` writes complete messages to logs for local testing.
 Those messages can contain invitation or password-reset tokens, so never use it
 where logs are shared. Test delivery from Settings or
@@ -1923,12 +1947,21 @@ ui_base_url: "https://app.example.com/dashboard"
 
 Unset, `public_base_url` is used.
 
-- Supply an absolute http(s) URL with no trailing slash.
-- Credentials and fragments are refused, since the value goes into redirects
-  and mail.
-- A query string is kept and joined to every link's own query, ahead of its
-  fragment (`https://app.example.com/dashboard/verify-email?edge=a#token=…`),
-  for an edge that serves one interface for several deployments.
+Supply an absolute http(s) URL with no trailing slash for either setting. A
+username or password in one is refused, because the value goes into redirects
+and into everybody's inbox. What may follow the host differs, because the two
+are joined to a path in different ways:
+
+- `public_base_url` refuses a query string and a fragment. Every URL naming this
+  deployment is built by appending to it, so either one would land in the middle
+  of the result instead of at its end.
+- `ui_base_url` refuses a fragment and keeps a query string, which is joined to
+  every link's own query ahead of its fragment
+  (`https://app.example.com/dashboard/verify-email?edge=a#token=…`), for an edge
+  that serves one interface for several deployments.
+
+An edge that tags its links therefore sets `ui_base_url` for the query, and
+leaves `public_base_url` as the plain address this process answers on.
 
 A dashboard served from a sibling host of this process may hold a session here
 only when that host is listed in `cors_allow_origins`: the session cookie is

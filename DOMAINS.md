@@ -86,8 +86,14 @@ credentials and the model catalog, so it is **providers** and **catalog**.
 ### identity
 
 Who a person is and how they sign in: passwords, passkeys, OAuth, dashboard
-sessions, email verification and reset, the profile, and deployment-wide
-account administration.
+sessions, personal access tokens, email verification and reset, the profile,
+and deployment-wide account administration.
+
+A personal access token authenticates a read of the management API as its
+owner, in the organization it was made for, as a session would; an MCP client's
+sign-in is one too, renewed by a rotating refresh token and good only through `/mcp`. The MCP server at `/mcp` (`api/mcp_server.py`)
+reads with one: each of its tools is one such read through the app, so it is
+an adapter in the API layer and decides nothing about who sees what.
 
 Its tables sit in `models/tenancy.py` today, which organizations holds, except
 `oauth_identity_link` and `oidc_connection` in `models/identity.py`. The
@@ -237,6 +243,11 @@ the request path and the Playground read it through the same service.
 
 It also owns an organization's web search keys and each workspace's choice
 among them (`org_web_search_keys`, `workspace_web_search_key_overrides`).
+An organization's own MCP servers share `workspace_mcp_servers` with the
+workspaces' servers, with no workspace, so every sign-in and grant names one
+kind of server id. Each workspace's settings on one
+(`workspace_mcp_server_overrides`) belong here, and so do the old ids of the
+workspace copies folded into one (`mcp_server_aliases`).
 So does a member's request for a catalog server and a manager's answer to it
 (`mcp_server_requests`): `McpServerRequestService` asks mcp-catalog for the
 entry a request names and the tenancy checks for who manages the workspace,

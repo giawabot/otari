@@ -311,7 +311,6 @@ class SandboxBackend:
         tally: ToolUsageTally | None = None,
         trace: RequestTrace | None = None,
         files: SandboxFiles | None = None,
-        files_base_url: str | None = None,
         container: ContainerLease | None = None,
         containers: SandboxContainers | None = None,
         on_lease: Callable[[ContainerLease], None] | None = None,
@@ -326,10 +325,6 @@ class SandboxBackend:
         # The lease this request holds once the session is open, for the route
         # to report. Only set when a registry will hold the sandbox.
         self.lease: ContainerLease | None = None
-        # Where this deployment serves ``/v1/files`` from: a loop answering in
-        # OpenAI's vocabulary needs a URL to announce a produced image with.
-        # None outside a request (tests, direct use), which announces none.
-        self.files_base_url = files_base_url
         # The request's file bridge, or None when it has no uploads to seed and
         # nowhere to keep what a run produces (tests, direct use).
         self._files = files
@@ -629,11 +624,11 @@ class SandboxBackend:
             return TOOL_BUDGET_EXCEEDED_TEXT
         try:
             result, block, file_ids = await self._exec_tool(code, language)
-        except Exception:
+        except Exception as exc:
             self._executions.append(CodeExecution(code=code, result=None))
             if self._tally is not None:
                 self._tally.record_failure(CODE_EXECUTION_TOOL_NAME)
-            self._spans.record(started, ok=False, arguments=arguments)
+            self._spans.record(started, ok=False, arguments=arguments, error_type=type(exc).__name__)
             raise
         self._executions.append(CodeExecution(code=code, result=block, file_ids=file_ids))
         if self._tally is not None:

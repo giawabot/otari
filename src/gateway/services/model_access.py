@@ -23,7 +23,7 @@ what everyone may call, and grants for single keys and users.
 
 import difflib
 import uuid
-from collections.abc import Container, Mapping, Sequence
+from collections.abc import Collection, Container, Mapping, Sequence
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from typing import Literal
@@ -312,6 +312,29 @@ def expand_mcp_tool_patterns(patterns: Sequence[str], read_tools: Sequence[str])
     return expanded + [name for name in read_tools if name not in expanded]
 
 
+def _both(pattern: str, other: str) -> str | None:
+    """The one pattern matching exactly the tools both match, or ``None`` where no tool matches both."""
+    if pattern.endswith("*") and other.endswith("*"):
+        if other.startswith(pattern[:-1]):
+            return other
+        return pattern if pattern.startswith(other[:-1]) else None
+    if pattern.endswith("*"):
+        return other if other.startswith(pattern[:-1]) else None
+    if other.endswith("*"):
+        return pattern if pattern.startswith(other[:-1]) else None
+    return pattern if pattern == other else None
+
+
+def clip_mcp_tool_patterns(patterns: Sequence[str], limit: Sequence[str]) -> list[str]:
+    """The tool patterns matching exactly the tools that match both lists, ``@read`` already expanded in each.
+
+    Exact because a pattern is ``*``, ``prefix*`` or a name, and two of those match a common set that one
+    pattern names, or nothing. An empty answer matches no tool.
+    """
+    clipped = (_both(pattern, other) for pattern in patterns for other in limit)
+    return list(dict.fromkeys(pattern for pattern in clipped if pattern is not None))
+
+
 def mcp_read_tools(labeled: Sequence[str] | None, hinted: Sequence[object] | None) -> list[str]:
     """A server's read tools: a manager's labels once they set them, else the tools the server marked read-only.
 
@@ -435,10 +458,17 @@ async def resolve_request_mcp_access(
     key_id, user_id = (api_key.id, api_key.user_id) if api_key is not None else (None, session_user_id)
     key_grants: dict[uuid.UUID, tuple[str, ...]] = {}
     user_grants: dict[uuid.UUID, tuple[str, ...]] = {}
-    server_ids = await WorkspaceMcpServerRepository(db).ids_in_workspace(workspace_id) if workspace_id else None
-    for grant in await WorkspaceMcpServerGrantRepository(db).for_caller(key_id, user_id, server_ids):
-        (key_grants if grant.api_key_id is not None else user_grants)[grant.server_id] = tuple(grant.tools)
     workspace = await WorkspaceRepository(db).get(workspace_id) if workspace_id is not None else None
+    server_ids = (
+        await WorkspaceMcpServerRepository(db).ids_in_workspace(workspace.id, workspace.organization_id)
+        if workspace is not None
+        else None
+    )
+    grants = await WorkspaceMcpServerGrantRepository(db).for_caller(
+        key_id, user_id, server_ids, workspace_id=workspace.id if workspace is not None else None
+    )
+    for grant in grants:
+        (key_grants if grant.api_key_id is not None else user_grants)[grant.server_id] = tuple(grant.tools)
     return McpAccess(
         # The shared ``default`` user stands for "no owner": every key created without one belongs
         # to it, so a connection of its own would be one account behind all of them.
@@ -474,14 +504,15 @@ def tool_not_allowed_detail(
     return detail
 
 
-def _known_prefix(config: GatewayConfig, prefix: str) -> bool:
+def _known_prefix(config: GatewayConfig, prefix: str, key_slugs: Collection[str]) -> bool:
     """Whether a prefix names something a model allow-list entry can legitimately gate.
 
-    A configured provider instance or a known any-llm provider. The configured
-    decision providers are accepted because ``/v1/decisions`` checks
+    A configured provider instance, a known any-llm provider, or one of
+    ``key_slugs``, the slugs the organization's own keys are reached by. The
+    configured decision providers are accepted because ``/v1/decisions`` checks
     ``<provider>:<model>``.
     """
-    if prefix in config.providers:
+    if prefix in config.providers or prefix in key_slugs:
         return True
     if prefix in config.decision_providers:
         return True
@@ -520,6 +551,7 @@ def _validate_entry(
     workspace_id: uuid.UUID | None = None,
     organization_id: uuid.UUID | None = None,
     within: list[str] | None = None,
+    key_slugs: Collection[str] = (),
 ) -> list[str]:
     """Validate + canonicalize one allow-list entry, or raise ``ValueError``.
 
@@ -543,17 +575,19 @@ def _validate_entry(
         raise ValueError(f"'{entry}': only a single trailing '*' is allowed (openai:* or openai:gpt-4*)")
     if offerings := _catalog_offerings(entry, workspace_id=workspace_id, organization_id=organization_id):
         # No entry can name a hosted provider called otherwise than its
-        # implementation, a hosted region, or a key reached by its slug, so the
-        # model's other offerings stand for those.
-        if storable := [offering for offering in offerings if _known_prefix(config, offering.partition(":")[0])]:
+        # implementation or a hosted region, so the model's other offerings
+        # stand for those.
+        if storable := [
+            offering for offering in offerings if _known_prefix(config, offering.partition(":")[0], key_slugs)
+        ]:
             # Where the owner covers none, all are kept, so the list is refused as exceeding the owner's.
             if within is None:
                 return storable
             return [offering for offering in storable if _covers(within, offering)] or storable
-        if not _known_prefix(config, prefix):
+        if not _known_prefix(config, prefix, key_slugs):
             raise ValueError(f"'{entry}' is served only through providers an allowed_models entry cannot name")
     canonical = f"{prefix}:{model}"
-    if _known_prefix(config, prefix) or canonical in config.legacy_search_tool_keys():
+    if _known_prefix(config, prefix, key_slugs) or canonical in config.legacy_search_tool_keys():
         return [canonical]
     if prefix in config.search_tool_providers():
         raise ValueError(
@@ -570,6 +604,7 @@ def validate_allowed_models(
     workspace_id: uuid.UUID | None = None,
     organization_id: uuid.UUID | None = None,
     within: list[str] | None = None,
+    key_slugs: Collection[str] = (),
 ) -> list[str] | None:
     """Validate + canonicalize a write. ``None`` and ``[]`` pass through as-is.
 
@@ -579,6 +614,8 @@ def validate_allowed_models(
     through ``workspace_id``, so the result can be longer than ``entries``. A
     key's write passes its owner's list as ``within``, and a catalog ID then
     stands for the offerings that list covers, since the key may only narrow it.
+    ``key_slugs`` are the slugs the organization's keys are reached by, which an
+    entry may name like a provider.
     """
     if entries is None:
         return None
@@ -589,7 +626,14 @@ def validate_allowed_models(
         if not isinstance(entry, str):
             raise ValueError("allowed_models entries must be strings")
         canonical |= dict.fromkeys(
-            _validate_entry(config, entry, workspace_id=workspace_id, organization_id=organization_id, within=within)
+            _validate_entry(
+                config,
+                entry,
+                workspace_id=workspace_id,
+                organization_id=organization_id,
+                within=within,
+                key_slugs=key_slugs,
+            )
         )
     return list(canonical)
 

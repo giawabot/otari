@@ -81,6 +81,14 @@ root anywhere under `src/gateway`.
 
 `verify_master_key` authenticates either a header master key or an active
 dashboard session. It does not prove that the session may act deployment-wide.
+`get_session_identity` also resolves a personal access token (`otari-pat-`) as
+its owner acting in the token's organization, on `GET` and `HEAD` only, so every
+route that takes a session takes a token for reads; a route that must refuse one
+asks `is_personal_access_token_request`, and a read that does more than read
+(dials a provider, finishes a connection) declares `refuse_access_tokens`. An
+MCP client's sign-in token (`otari-mcp-at-`) resolves the same way only inside
+`reading_through_mcp()`, which the MCP server (`api/mcp_server.py`) opens around
+the reads its tools make through the app, so a route's own checks are the only ones.
 
 - Deployment-wide management routers declare
   `require_deployment_operator` on the router, not per route, so a route added
@@ -348,8 +356,9 @@ from their own code, so it filters on the endpoint label as well as the source
 The activation-state table stores only dismissal and setup-key state.
 
 Key issuance requires workspace management authority and rotates the existing
-setup key. `activation_guide` disables eligibility without unmounting the
-endpoints.
+setup key, except for a member who does not manage the workspace
+(`WorkspaceMemberActivationState`). `activation_guide` disables eligibility
+without unmounting the endpoints.
 
 ## Data and migrations
 

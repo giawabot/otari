@@ -51,10 +51,13 @@ from gateway.repositories.tenancy import (
     WorkspaceRepository,
 )
 from gateway.repositories.tools import (
+    McpServerAliasRepository,
     McpUserConnectionRepository,
     OrgWebSearchKeyRepository,
     SearchToolRepository,
     WorkspaceCodeExecutionPolicyRepository,
+    WorkspaceMcpServerOverrideRepository,
+    WorkspaceMcpServerRepository,
     WorkspaceWebSearchKeyOverrideRepository,
 )
 from gateway.repositories.usage_and_telemetry import (
@@ -103,7 +106,9 @@ from gateway.services.tools import (
     DirectToolRate,
     DirectToolService,
     DirectToolUsage,
+    McpToolListings,
     McpUserTokens,
+    McpWorkspaceServers,
     SearchCatalogCaller,
     SearchToolService,
     ToolRateInForce,
@@ -200,6 +205,15 @@ async def get_workspace_mcp_servers(db: Annotated[AsyncSession, Depends(get_db)]
 
 
 WorkspaceMcpServersDep = Annotated[WorkspaceMcpServers, Depends(get_workspace_mcp_servers)]
+
+
+def get_mcp_tool_listings(request: Request) -> McpToolListings | None:
+    """The app's kept MCP tool listings, or ``None`` outside the app's lifespan, where discovery keeps nothing."""
+    listings: McpToolListings | None = getattr(request.app.state, "mcp_tool_listings", None)
+    return listings
+
+
+McpToolListingsDep = Annotated[McpToolListings | None, Depends(get_mcp_tool_listings)]
 
 
 def get_web_provider_client(request: Request) -> httpx.AsyncClient:
@@ -647,3 +661,13 @@ def get_direct_tool_availability(
 
 
 DirectToolAvailabilityDep = Annotated[DirectToolAvailability, Depends(get_direct_tool_availability)]
+
+
+def get_mcp_workspace_servers(db: Annotated[AsyncSession, Depends(get_db)]) -> McpWorkspaceServers:
+    """Build the reader of the MCP servers a workspace reaches, its organization's too, on the request's session."""
+    return McpWorkspaceServers(
+        WorkspaceMcpServerRepository(db), WorkspaceMcpServerOverrideRepository(db), McpServerAliasRepository(db)
+    )
+
+
+McpWorkspaceServersDep = Annotated[McpWorkspaceServers, Depends(get_mcp_workspace_servers)]

@@ -8,6 +8,7 @@ from typing import Protocol, cast
 
 import idna
 
+from gateway.core.address_proof import record_address
 from gateway.core.addresses import same_address
 from gateway.core.email_domains import blocklist_entry, blocklist_keys
 from gateway.core.tokens import generate_shared_token, generate_token, hash_token
@@ -32,6 +33,7 @@ from gateway.exceptions.identity_exceptions import (
 )
 from gateway.log_config import logger
 from gateway.models.identity import (
+    AddressAuthority,
     BlockedEmail,
     EmailAssertion,
     MailedLinkStatus,
@@ -146,6 +148,7 @@ class IdentityService:
         self._links = repositories.links
         self._passkeys = repositories.passkeys
         self._sessions = repositories.sessions
+        self._access_tokens = repositories.access_tokens
         self._users = repositories.users
         self._identity_provider = identity_provider
         self._domain_claims = domain_claims
@@ -324,6 +327,7 @@ class IdentityService:
                 pattern=pattern, reason=(reason or "").strip() or None, created_by_user_id=actor.id
             )
             await self._sessions.delete_for_users(matched)
+            await self._access_tokens.delete_all_for_users(matched)
         logger.warning(
             "Email blocklist entry added by operator: actor=%s entry=%s matched_accounts=%s",
             actor.id,
@@ -674,8 +678,8 @@ class IdentityService:
         """Prove the account's address where this sign-in asserts it, and say whether a password went with it.
 
         A proof means the holder of the address authenticated, so the password chosen through a link
-        its mailbox never saw, the reset and verification links, the sessions and the passkeys set up
-        since all go, as on a first sign-in.
+        its mailbox never saw, the reset and verification links, the sessions, the passkeys and the
+        access tokens set up since all go, as on a first sign-in.
 
         What a provider asserts is evidence only about the address it named, and only where no tenant
         can set what it says. An address the account holds for another reason is left alone.
@@ -687,7 +691,7 @@ class IdentityService:
         if not _asserts_this_address(account, external):
             return False
         password_removed = account.hashed_password is not None
-        account.email_proven_at = datetime.now(UTC)
+        record_address(account, now=datetime.now(UTC), authority=AddressAuthority.TRUSTED_PROVIDER)
         account.hashed_password = None
         account.email_verification_token_hash = None
         account.email_verification_token_expires_at = None
@@ -696,6 +700,7 @@ class IdentityService:
         self._users.stage(account)
         await self._sessions.delete_for_user(account.id)
         await self._passkeys.delete_for_user(account.id)
+        await self._access_tokens.delete_all_for_users({account.id})
         return password_removed
 
     def _record_terms(self, account: User, *, terms_accepted: bool) -> None:

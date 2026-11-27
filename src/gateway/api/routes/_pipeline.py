@@ -206,7 +206,6 @@ from gateway.models.mcp import McpServerConfig
 from gateway.models.money import to_usd
 from gateway.models.pricing import REPORTED_SOURCE, ModelPricing, SettledSource
 from gateway.models.tools import (
-    CodeExecutor,
     ResolvedCodeExecutionPolicy,
     ResolvedWebSearchConfig,
     WebTool,
@@ -3443,7 +3442,6 @@ class ToolContext:
         sandbox_exec_timeout_s: int | None = None,
         sandbox_session_image: str | None = None,
         sandbox_allowed_tools: frozenset[str] | None = None,
-        code_execution_executor: CodeExecutor | None = None,
         sandbox_container_lease: ContainerLease | None = None,
         sandbox_containers: SandboxContainerRegistry | None = None,
         web: AdmittedWebTools | None = None,
@@ -3456,8 +3454,11 @@ class ToolContext:
         shared: SharedToolUse | None = None,
         web_provider_client: httpx.AsyncClient | None = None,
         guardrails: RequestGuardrails | None = None,
+        workspace_id: uuid.UUID | None = None,
     ) -> None:
         self.config = config
+        # The request's workspace, which a sign-in link names so the sign-in starts from it.
+        self.workspace_id = workspace_id
         # The request's guardrails, which the gateway's tools and the answer pass
         # through; None where the request runs none.
         self.guardrails = guardrails
@@ -3489,10 +3490,6 @@ class ToolContext:
         self.sandbox_container_lease = sandbox_container_lease
         self.sandbox_containers = sandbox_containers
         self.container_lease: ContainerLease | None = None
-        # Who was decided to run the request's code-execution declaration, when it
-        # made one: ``OTARI`` or ``PROVIDER``, never ``AUTO``. ``None`` when the
-        # request declared no code execution at all.
-        self.code_execution_executor = code_execution_executor
         # The managed web tools admitted for the request, and what runs them.
         self.web = web if web is not None else NO_WEB_TOOLS
         # The app's client, which a provider fetch instance is called through. None outside
@@ -3591,7 +3588,6 @@ class ToolContext:
             tally=self.tally,
             trace=self.trace,
             files=self.sandbox_files,
-            files_base_url=self.sandbox_files.base_url if self.sandbox_files is not None else None,
             container=self.sandbox_container_lease,
             containers=self.sandbox_containers,
             on_lease=self._note_container_lease,
@@ -4078,6 +4074,7 @@ async def prepare_gateway_tools(
         code, web, web_access = answer.code, answer.web, answer.web_access
         return ToolContext(
             config=ctx.config,
+            workspace_id=ctx.workspace_id,
             mcp_server_configs=mcp.servers,
             mcp_sign_in=mcp.sign_in,
             use_sandbox=code.use_sandbox,
@@ -4086,7 +4083,6 @@ async def prepare_gateway_tools(
             sandbox_exec_timeout_s=code.exec_timeout_s,
             sandbox_session_image=code.session_image,
             sandbox_allowed_tools=code.allowed_tools,
-            code_execution_executor=code.executor,
             sandbox_container_lease=code.container_lease,
             sandbox_containers=code.containers,
             web=web_access,
@@ -4540,7 +4536,7 @@ async def _admit_mcp_servers(
             ctx.api_key is not None
             and not ctx.session
             and KeyScope.MCP_EXECUTE in ctx.api_key.scopes
-            and await servers.any_attached(ctx.workspace_id)
+            and await servers.any_attached(ctx.workspace_id, ctx.organization_id)
         )
         access = (
             await resolve_request_mcp_access(
@@ -5810,7 +5806,7 @@ async def _open_tool_backends(
             McpSignInBackend(
                 [*tool_ctx.mcp_sign_in, *signed_out],
                 mint=lambda server_id, user_id: McpConnectionService.sign_in_link(
-                    tool_ctx.config, server_id=server_id, user_id=user_id
+                    tool_ctx.config, server_id=server_id, user_id=user_id, workspace_id=tool_ctx.workspace_id
                 ),
                 link_prefix=McpConnectionService.sign_in_link_prefix(tool_ctx.config),
                 taken=taken | tool_ctx.reserved_tool_names | _declared_tool_names(tool_ctx.remaining_user_tools),
@@ -6394,9 +6390,7 @@ def build_streaming_response(
     async def _on_error(exc: BaseException) -> None:
         report_refusal(exc)
         if automatic_observation is not None:
-            automatic_observation.finish(
-                unhealthy=_automatic_unhealthy(exc), account=AutomaticRouter.is_account_failure(exc)
-            )
+            _finish_failed(automatic_observation, exc)
         if isinstance(exc, IncompleteStreamError):
             # codeql[py/clear-text-logging-sensitive-data]
             logger.warning(
@@ -6637,6 +6631,15 @@ def _automatic_unhealthy(exc: BaseException) -> bool:
         or kind in {"timeout", "conn_err"}
         or code in (402, 429)
         or (code is not None and code >= 500)
+    )
+
+
+def _finish_failed(observation: AutomaticObservation, exc: BaseException) -> None:
+    """Report a failed call to automatic routing, as an outage, a failed credential or a model not served."""
+    observation.finish(
+        unhealthy=_automatic_unhealthy(exc),
+        account=AutomaticRouter.is_account_failure(exc),
+        missing=AutomaticRouter.is_missing_model(exc),
     )
 
 
@@ -6891,9 +6894,7 @@ async def run_single_attempt_stream(
                     )
                 except BaseException as exc:
                     if observation is not None:
-                        observation.finish(
-                            unhealthy=_automatic_unhealthy(exc), account=AutomaticRouter.is_account_failure(exc)
-                        )
+                        _finish_failed(observation, exc)
                     raise
 
             absorbed_rows: list[asyncio.Task[None]] = []
@@ -7353,9 +7354,7 @@ async def run_non_stream(
                     )
                 except BaseException as exc:
                     if observation is not None:
-                        observation.finish(
-                            unhealthy=_automatic_unhealthy(exc), account=AutomaticRouter.is_account_failure(exc)
-                        )
+                        _finish_failed(observation, exc)
                     raise
                 if observation is not None:
                     observation.finish(success=True)

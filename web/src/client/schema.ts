@@ -427,6 +427,54 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/auth/access-tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List Access Tokens
+         * @description The caller's own access tokens, newest first. Never anybody else's, and never a token itself.
+         */
+        get: operations["auth-list_access_tokens"];
+        put?: never;
+        /**
+         * Create Access Token
+         * @description Mint an access token that reads what the caller can see on the dashboard, as them.
+         *
+         *     It reads the organization the caller is acting in now, even after the dashboard switches
+         *     to another. It authenticates `GET` requests to the management API and the MCP server at
+         *     `/mcp`, is refused on every write, and lives a year at most. The token is in this response only.
+         */
+        post: operations["auth-create_access_token"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/api/v1/auth/access-tokens/{token_id}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        post?: never;
+        /**
+         * Delete Access Token
+         * @description Revoke one of the caller's access tokens at once.
+         */
+        delete: operations["auth-delete_access_token"];
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/auth/account": {
         parameters: {
             query?: never;
@@ -3156,10 +3204,14 @@ export interface paths {
          * List Mcp Tools
          * @description List the tools a stored MCP server exposes to the authenticated workspace.
          *
-         *     Call this once per server when preparing a model or workflow run, and reuse
-         *     the answer for every tool from that server for the length of the run: there
-         *     is no cross-run cache in this version, so a later run rediscovers and
-         *     staleness stays bounded without any invalidation state to keep.
+         *     Otari keeps each server's own tool listing for up to five minutes and answers
+         *     from it, so calling this at the start of every run costs no connection to the
+         *     server. The `Age` response header says how many seconds old the listing is,
+         *     and `Cache-Control: no-cache` on the request asks the server again. A kept
+         *     listing is never served across an edit to the server (its `server_revision`
+         *     changes) or to a different credential, so each user of a per-user server is
+         *     answered from a listing read with their own token. The key's access rule is
+         *     applied on every call, never kept.
          *
          *     The response is the whole authorized catalog or an error. It is never
          *     partial, because a caller would read a short catalog as the complete input
@@ -3439,6 +3491,29 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/api/v1/oauth/apps/register": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Register Client
+         * @description Register a public OAuth client that names itself (RFC 7591), as an MCP client does on first connect.
+         *
+         *     What it is approved for redeems only to the approving person's read-only access token, and
+         *     the consent screen names it as unverified. Served where the MCP server is on.
+         */
+        post: operations["oauth-apps-register_client"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/api/v1/oauth/apps/revoke": {
         parameters: {
             query?: never;
@@ -3470,7 +3545,11 @@ export interface paths {
         put?: never;
         /**
          * Exchange
-         * @description Exchange a form-encoded single-use authorization code and S256 verifier for a revocable API key.
+         * @description Exchange a form-encoded single-use authorization code and S256 verifier for a revocable credential.
+         *
+         *     A registered or open app is given an API key. A client that registered itself is given a
+         *     read-only access token good for an hour through the MCP server, and a refresh token that
+         *     renews it here (``grant_type=refresh_token``) until the sign-in the person approved ends.
          */
         post: operations["oauth-apps-exchange"];
         delete?: never;
@@ -8279,10 +8358,10 @@ export interface paths {
          * Dismiss Workspace Activation
          * @description Retire the guide for this workspace. Permanent, and idempotent.
          *
-         *     Workspace owners and admins only. It retires the card and nothing else: the
-         *     key the guide issued keeps working, because the operator asked for it and
-         *     may well have pasted it somewhere already. Revoking one is the Keys page's
-         *     job.
+         *     For a member who does not manage the workspace, for them alone; a viewer is
+         *     refused. It retires the card and nothing else: the key the guide issued
+         *     keeps working, because the operator asked for it and may well have pasted it
+         *     somewhere already. Revoking one is the Keys page's job.
          */
         post: operations["workspace-activation-dismiss_workspace_activation"];
         delete?: never;
@@ -8302,12 +8381,13 @@ export interface paths {
         put?: never;
         /**
          * Create Workspace Activation Key
-         * @description Issue the workspace's setup API key, rotating the one the guide already issued.
+         * @description Issue the setup API key, rotating the one the guide already issued.
          *
-         *     Workspace owners and admins only, like every other action that changes a
-         *     workspace. The plaintext is returned once and never stored, so a reopened
-         *     guide rotates the same key row rather than collecting a second one, and
-         *     answers 409 once the workspace has activated or the guide was dismissed.
+         *     The workspace's for its owners and admins, the caller's own for a member who
+         *     does not manage it; a viewer is refused. The plaintext is returned once and
+         *     never stored, so a reopened guide rotates the same key row rather than
+         *     collecting a second one, and answers 409 once the guide is finished or was
+         *     dismissed.
          */
         post: operations["workspace-activation-create_workspace_activation_key"];
         delete?: never;
@@ -9564,6 +9644,101 @@ export interface components {
             /** Model Count */
             model_count: number;
         };
+        /** AccessTokenCreate */
+        AccessTokenCreate: {
+            /**
+             * Expiration
+             * @description How long the token lives from now, at most a year.
+             * @default 90-days
+             * @enum {string}
+             */
+            expiration: "1-hour" | "1-day" | "7-days" | "30-days" | "90-days" | "180-days" | "1-year";
+            /**
+             * Name
+             * @description What the token is for.
+             */
+            name: string;
+        };
+        /** AccessTokenCreated */
+        AccessTokenCreated: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Expires At
+             * @description When it ends. For an MCP client's sign-in, when renewing its access token stops working.
+             */
+            expires_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Last Used At
+             * @description Accurate to about a minute. Null until first used.
+             */
+            last_used_at: string | null;
+            /** Name */
+            name: string;
+            /**
+             * Organization Id
+             * @description The organization it reads, whichever one the dashboard has switched to since.
+             */
+            organization_id: string | null;
+            /**
+             * Token
+             * @description The token itself. Shown once: only its hash is stored.
+             */
+            token: string;
+            /**
+             * Token Suffix
+             * @description The token's last characters, to tell it apart from the account's others.
+             */
+            token_suffix: string;
+        };
+        /** AccessTokenPublic */
+        AccessTokenPublic: {
+            /**
+             * Created At
+             * Format: date-time
+             */
+            created_at: string;
+            /**
+             * Expires At
+             * @description When it ends. For an MCP client's sign-in, when renewing its access token stops working.
+             */
+            expires_at: string | null;
+            /**
+             * Id
+             * Format: uuid
+             */
+            id: string;
+            /**
+             * Last Used At
+             * @description Accurate to about a minute. Null until first used.
+             */
+            last_used_at: string | null;
+            /** Name */
+            name: string;
+            /**
+             * Organization Id
+             * @description The organization it reads, whichever one the dashboard has switched to since.
+             */
+            organization_id: string | null;
+            /**
+             * Token Suffix
+             * @description The token's last characters, to tell it apart from the account's others.
+             */
+            token_suffix: string;
+        };
+        /** AccessTokensPublic */
+        AccessTokensPublic: {
+            /** Data */
+            data: components["schemas"]["AccessTokenPublic"][];
+        };
         /**
          * ActivationApiKeyPublic
          * @description The API key the guide hands out, with its plaintext.
@@ -10492,6 +10667,11 @@ export interface components {
              * @description The key's spending limit in USD over its whole life. Null sets none.
              */
             limit?: number | string | null;
+            /**
+             * Organization Id
+             * @description The organization an access token reads: the one the consent screen showed. Required when the app is given an access token, and refused unless the person is acting in it.
+             */
+            organization_id?: string | null;
             /** Redirect Uri */
             redirect_uri: string;
             /**
@@ -10509,9 +10689,9 @@ export interface components {
             state: string;
             /**
              * Workspace Id
-             * Format: uuid
+             * @description The workspace the key bills. Required unless the app is given an access token.
              */
-            workspace_id: string;
+            workspace_id?: string | null;
         };
         /** AppAuthorizationResponse */
         AppAuthorizationResponse: {
@@ -10523,6 +10703,13 @@ export interface components {
          * @description What the consent screen shows about an app before a person approves it.
          */
         AppDetails: {
+            /**
+             * Credential
+             * @description What the app is given: an API key billed to a workspace the person picks, or, for a client that registered itself such as an MCP client, the person's own read-only access token.
+             * @default api_key
+             * @enum {string}
+             */
+            credential: "api_key" | "access_token";
             /** Issuer */
             issuer: string;
             /** Name */
@@ -10555,39 +10742,54 @@ export interface components {
         /**
          * AppTokenRequest
          * @description Unrecognized parameters, such as a public client's empty ``client_secret``, are ignored.
+         *
+         *     An authorization code is redeemed with its callback and verifier; a refresh token, which
+         *     only a client that registered itself holds, on its own.
          */
         AppTokenRequest: {
             /** Client Id */
             client_id: string;
             /** Code */
-            code: string;
+            code?: string | null;
             /** Code Verifier */
-            code_verifier: string;
+            code_verifier?: string | null;
             /**
              * Grant Type
-             * @constant
+             * @enum {string}
              */
-            grant_type: "authorization_code";
+            grant_type: "authorization_code" | "refresh_token";
             /** Redirect Uri */
-            redirect_uri: string;
+            redirect_uri?: string | null;
+            /** Refresh Token */
+            refresh_token?: string | null;
         };
         /**
          * AppTokenResponse
-         * @description A minted app key, as RFC 6749 section 5.1 shapes it.
+         * @description A minted app key or access token, as RFC 6749 section 5.1 shapes it.
          */
         AppTokenResponse: {
             /** Access Token */
             access_token: string;
+            /**
+             * Expires In
+             * @description Seconds until an access token expires, where it does.
+             */
+            expires_in?: number | null;
             /**
              * Manage Url
              * @description The absolute URL of the page where the person sees this key, and revokes it.
              */
             manage_url: string;
             /**
-             * Scope
-             * @description The scopes the key holds, space delimited. Fewer than the registration names where the person approved it before an operator narrowed it.
+             * Refresh Token
+             * @description Renews an MCP client's access token at this endpoint, and is replaced on each use. Using one a second time ends the sign-in.
              */
-            scope: string;
+            refresh_token?: string | null;
+            /**
+             * Scope
+             * @description The scopes the key holds, space delimited. Fewer than the registration names where the person approved it before an operator narrowed it. Absent for an access token.
+             */
+            scope?: string | null;
             /**
              * Token Type
              * @default Bearer
@@ -11420,6 +11622,11 @@ export interface components {
          */
         CatalogFacets: {
             /**
+             * Data Locations
+             * @description Every data location a hosted provider declares for an authorized model, as listed, sorted.
+             */
+            data_locations?: string[];
+            /**
              * Providers
              * @description Every provider instance offering an authorized model, sorted.
              */
@@ -11450,6 +11657,11 @@ export interface components {
              * @description The largest any offering serves.
              */
             context_window?: number | null;
+            /**
+             * Data Locations
+             * @description Where the hosted providers offering it keep request data, as the operator declares it: ISO 3166-1 alpha-2 country codes, `EU` or `GLOBAL`, distinct and sorted. One entry per place a provider may serve it from, so a provider with several regions gives several. Providers that declare nothing, and every `providers:` instance and organization key, add none.
+             */
+            data_locations?: string[];
             /**
              * Default Pricing
              * @description Whether an unpriced model is metered at the models.dev default.
@@ -11571,6 +11783,11 @@ export interface components {
              */
             context_window?: number | null;
             /**
+             * Data Locations
+             * @description Where the hosted providers offering it keep request data, as the operator declares it: ISO 3166-1 alpha-2 country codes, `EU` or `GLOBAL`, distinct and sorted. One entry per place a provider may serve it from, so a provider with several regions gives several. Providers that declare nothing, and every `providers:` instance and organization key, add none.
+             */
+            data_locations?: string[];
+            /**
              * Deprecated
              * @description True only when every offering with metadata says so.
              * @default false
@@ -11681,6 +11898,11 @@ export interface components {
             context_window?: number | null;
             /** @description Whose key serves it: `deployment` for a `providers:` instance the operator configured, `hosted` for a provider the deployment pays for in any workspace of the viewer's organization, `organization` for one on the organization's own key, which it may set its own rate for. A workspace can still call a `hosted` provider with the organization's own key. */
             credential: components["schemas"]["CatalogCredential"];
+            /**
+             * Data Locations
+             * @description Where a `hosted` offering's provider keeps request data, one entry per place it may serve from, distinct and sorted; empty where it declares none and for every other offering.
+             */
+            data_locations?: string[];
             /**
              * Discovered
              * @description Whether the provider itself reported this model.
@@ -12105,6 +12327,30 @@ export interface components {
             type: "choice";
         } & {
             [key: string]: unknown;
+        };
+        /**
+         * ClientRegistrationResponse
+         * @description RFC 7591 section 3.2.1: the registration as recorded. Every client registered here is public.
+         */
+        ClientRegistrationResponse: {
+            /** Client Id */
+            client_id: string;
+            /** Client Id Issued At */
+            client_id_issued_at: number;
+            /** Client Name */
+            client_name: string;
+            /** Grant Types */
+            grant_types?: string[];
+            /** Redirect Uris */
+            redirect_uris: string[];
+            /** Response Types */
+            response_types?: string[];
+            /**
+             * Token Endpoint Auth Method
+             * @default none
+             * @constant
+             */
+            token_endpoint_auth_method: "none";
         };
         /**
          * CodeExecuteRequest
@@ -17486,8 +17732,12 @@ export interface components {
              * @default false
              */
             deployment_managed: boolean;
+            /** Description */
+            description?: string | null;
             /** Id */
             id: string;
+            /** Knowledge Cutoff */
+            knowledge_cutoff?: string | null;
             /** Max Output Tokens */
             max_output_tokens?: number | null;
             /** Name */
@@ -17505,6 +17755,8 @@ export interface components {
              * @default none
              */
             pricing_source: string;
+            /** Release Date */
+            release_date?: string | null;
             /** Supported Parameters */
             supported_parameters?: string[] | null;
             /** Type */
@@ -24613,12 +24865,12 @@ export interface components {
             activation_attempt?: components["schemas"]["ActivationAttemptPublic"] | null;
             /**
              * Dismissed
-             * @description Whether someone skipped the guide for this workspace.
+             * @description Whether the guide was skipped: for the workspace, or for a member who does not manage it, by that member.
              */
             dismissed: boolean;
             /**
              * Experience Eligible
-             * @description Whether the dashboard should offer the guide to this caller right now: the deployment has it enabled, the workspace is classified for it, nobody dismissed it, no request has succeeded yet, and the caller may manage the workspace.
+             * @description Whether the dashboard should offer the guide to this caller right now: the deployment has it enabled, the workspace is classified for it, and the caller may run requests there. For someone who manages the workspace, nobody dismissed it and no request in the workspace has succeeded yet; for a member who does not, they have not dismissed it and no request of their own has succeeded yet.
              */
             experience_eligible: boolean;
             /** @description The setup key the guide already issued, so a reopened guide can offer it instead of rotating it. Null until one is issued, once it is revoked, deleted or expired, when the caller is not the one it was issued to, and whenever the guide is not offered to this caller. */
@@ -24627,7 +24879,7 @@ export interface components {
             latest_attempt?: components["schemas"]["ActivationAttemptPublic"] | null;
             /**
              * Status
-             * @description 'activated' once a gateway request in this workspace has succeeded, 'failed' when the last one failed and none has yet succeeded, 'waiting' when there has been none at all.
+             * @description 'activated' once a gateway request in this workspace has succeeded, 'failed' when the last one failed and none has yet succeeded, 'waiting' when there has been none at all. For a member who does not manage the workspace, only their own requests count.
              * @enum {string}
              */
             status: "waiting" | "failed" | "activated";
@@ -26422,6 +26674,88 @@ export interface operations {
             };
         };
     };
+    "auth-list_access_tokens": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessTokensPublic"];
+                };
+            };
+        };
+    };
+    "auth-create_access_token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["AccessTokenCreate"];
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["AccessTokenCreated"];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    "auth-delete_access_token": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                token_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            204: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content?: never;
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
     "auth-delete_own_account": {
         parameters: {
             query?: never;
@@ -27678,6 +28012,8 @@ export interface operations {
                 source?: "all" | "discovered" | "custom";
                 /** @description Only models at least one provider declared to keep no prompt or completion data offers. */
                 zero_data_retention?: boolean;
+                /** @description Only models a hosted provider serves from one of these data locations: ISO 3166-1 alpha-2 country codes, `EU` or `GLOBAL`. Matched as a workspace's `allowed_data_locations` is, so `EU` also matches each EU member state and `GLOBAL` only `GLOBAL`. A model whose location is undeclared matches none. */
+                data_location?: string[];
                 /** @description Release window ending today (UTC); zero disables it. Unknown and future releases do not match. */
                 released_within_days?: number;
                 sort?: "name" | "released" | "input" | "output" | "context" | "providers";
@@ -28546,7 +28882,7 @@ export interface operations {
                     "application/json": components["schemas"]["OpenAIFileObject"] | components["schemas"]["AnthropicFileMetadata"];
                 };
             };
-            /** @description The upload exceeds the configured maximum size. */
+            /** @description The upload exceeds the configured maximum size, or would take its workspace past the number of files or bytes the deployment allows. */
             413: {
                 headers: {
                     [name: string]: unknown;
@@ -31436,6 +31772,47 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    "oauth-apps-register_client": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": {
+                    /**
+                     * Client Name
+                     * @description The name the consent screen shows, marked unverified.
+                     */
+                    client_name?: string | null;
+                    /** Redirect Uris */
+                    redirect_uris: string[];
+                };
+            };
+        };
+        responses: {
+            /** @description Successful Response */
+            201: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ClientRegistrationResponse"];
+                };
+            };
+            /** @description Bad Request */
+            400: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["OAuthErrorResponse"];
                 };
             };
         };
@@ -36082,7 +36459,7 @@ export interface operations {
                     "application/json": components["schemas"]["OpenAIFileObject"];
                 };
             };
-            /** @description The upload exceeds the configured maximum size. */
+            /** @description The upload exceeds the configured maximum size, or would take its workspace past the number of files or bytes the deployment allows. */
             413: {
                 headers: {
                     [name: string]: unknown;

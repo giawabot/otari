@@ -38,14 +38,18 @@ from gateway.api.deps.auth import (
     SERVICE_KEY_REQUIRED_DETAIL,
     CallingKey,
     ServiceKey,
+    build_personal_access_token_service,
     catalog_reader_operates_deployment,
     catalog_reader_organization,
     cookie_may_authenticate,
     extract_credential_token,
     get_session_identity,
+    is_personal_access_token_request,
     is_valid_master_key,
     misdirected_key_detail,
+    reading_through_mcp,
     record_auth_failure,
+    refuse_access_tokens,
     refuse_ended_session,
     require_deployment_operator,
     verify_api_key,
@@ -69,12 +73,15 @@ from gateway.api.deps.identity import (
     IdentityServiceDep,
     OAuthAppServiceDep,
     OIDCConnectionServiceDep,
+    PersonalAccessTokenServiceDep,
     get_current_identity,
     get_deployment_administration_access,
     get_deployment_user_service,
     get_identity_service,
     get_oauth_app_service,
     get_oidc_connection_service,
+    get_personal_access_token_service,
+    oauth_app_issuer,
     require_deployment_operator_or_absent,
 )
 from gateway.api.deps.invitations import (
@@ -145,6 +152,8 @@ from gateway.api.deps.tools import (
     CodeExecutionEnvironmentServiceDep,
     DirectToolAvailabilityDep,
     DirectToolServiceDep,
+    McpToolListingsDep,
+    McpWorkspaceServersDep,
     OptionalWebProviderClientDep,
     PlaygroundToolOfferDep,
     SearchCatalogCallerDep,
@@ -164,6 +173,8 @@ from gateway.api.deps.tools import (
     get_code_execution_environment_service,
     get_direct_tool_availability,
     get_direct_tool_service,
+    get_mcp_tool_listings,
+    get_mcp_workspace_servers,
     get_optional_web_provider_client,
     get_playground_tool_offer,
     get_search_catalog_caller,
@@ -253,10 +264,12 @@ from gateway.repositories.tenancy import (
 )
 from gateway.repositories.tools import (
     McpOAuthFlowRepository,
+    McpServerAliasRepository,
     McpServerRequestRepository,
     McpSignInLinkUseRepository,
     McpUserConnectionRepository,
     WorkspaceMcpServerLogoRepository,
+    WorkspaceMcpServerOverrideRepository,
     WorkspaceMcpServerRepository,
 )
 from gateway.repositories.update_check import UpdateCheckStateRepository
@@ -326,6 +339,7 @@ from gateway.services.tools import (
     McpServerLogoService,
     McpServerRequestService,
     McpSignedInServers,
+    McpWorkspaceServers,
     WorkspaceMcpServerUrls,
 )
 from gateway.services.update_check import UpdateCheckService
@@ -389,7 +403,7 @@ def build_sandbox_file_bridge(
     and otherwise under the one the request arrived on.
     """
     backends = _file_backends(raw_request)
-    if not config.files_enabled or backends is None or user_id is None or workspace_id is None:
+    if not config.files_api_enabled or backends is None or user_id is None or workspace_id is None:
         return None
     base = (config.public_base_url or str(raw_request.base_url)).rstrip("/")
     return SandboxFileBridge(
@@ -569,6 +583,9 @@ def get_mcp_connection_service(
             UserRepository(uow),
         ),
         users=get_user_access(uow),
+        views=McpWorkspaceServers(
+            WorkspaceMcpServerRepository(uow), WorkspaceMcpServerOverrideRepository(uow), McpServerAliasRepository(uow)
+        ),
     )
 
 
@@ -1227,9 +1244,11 @@ __all__ = [
     "ModelProviderPortDep",
     "NoSessionOwners",
     "OAuthAppServiceDep",
+    "PersonalAccessTokenServiceDep",
     "OIDCConnectionServiceDep",
     "OperatesDeployment",
     "OptionalFileServiceDep",
+    "McpToolListingsDep",
     "OptionalWebProviderClientDep",
     "OrgProviderModelServiceDep",
     "OrganizationBreakGlass",
@@ -1265,6 +1284,8 @@ __all__ = [
     "VisibleWorkspacesDep",
     "WebProviderClientDep",
     "WebSearchKeyServiceDep",
+    "McpWorkspaceServersDep",
+    "get_mcp_workspace_servers",
     "WorkspaceAccessDep",
     "WorkspaceActivationServiceDep",
     "WorkspaceCodeExecutionPoliciesDep",
@@ -1283,6 +1304,7 @@ __all__ = [
     "build_invitation_cleanup",
     "build_invitation_delivery",
     "build_mcp_catalog_service",
+    "build_personal_access_token_service",
     "build_search_tool_refresh",
     "build_search_tool_service",
     "build_trace_service",
@@ -1332,6 +1354,7 @@ __all__ = [
     "get_organization_domain_service",
     "get_organization_service",
     "get_organization_trace_scope",
+    "get_personal_access_token_service",
     "get_person_growth_signal_port",
     "get_platform_break_glass",
     "get_platform_client",
@@ -1352,6 +1375,7 @@ __all__ = [
     "get_unit_of_work",
     "get_user_access",
     "get_visible_workspaces",
+    "get_mcp_tool_listings",
     "get_web_provider_client",
     "get_web_search_key_service",
     "get_workspace_access",
@@ -1365,11 +1389,15 @@ __all__ = [
     "invitation_policy_of",
     "get_workspace_web_search_policies",
     "get_workspace_web_search_service",
+    "is_personal_access_token_request",
     "is_valid_master_key",
     "is_workspace_member",
     "misdirected_key_detail",
     "model_provider_port_on",
+    "oauth_app_issuer",
+    "reading_through_mcp",
     "record_auth_failure",
+    "refuse_access_tokens",
     "refuse_ended_session",
     "require_capability",
     "require_deployment_operator",
