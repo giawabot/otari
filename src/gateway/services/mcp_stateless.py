@@ -105,6 +105,7 @@ EXECUTION_TOTAL_TIMEOUT_S = 45.0
 # Admission.
 DISCOVERY_CONCURRENCY = 4
 DISCOVERY_ADMISSION_TIMEOUT_S = 5.0
+CHECK_CONCURRENCY = 4
 EXECUTION_CONCURRENCY = 8
 EXECUTION_ADMISSION_TIMEOUT_S = 5.0
 
@@ -470,10 +471,12 @@ def discovery_response_exceeds_bound(response: Any) -> bool:
 class ConcurrencyGate:
     """A per-process slot ceiling with a bounded wait for admission.
 
-    Discovery and execution hold separate gates. Discovery talks to a
-    server that has not been authorized for anything yet and can be slow or
-    hostile; execution is running a call a person or a policy already approved.
-    One ceiling shared between them would let the first starve the second.
+    Discovery, execution and server checks hold separate gates. Discovery
+    talks to a server that has not been authorized for anything yet and can be
+    slow or hostile; execution is running a call a person or a policy already
+    approved. A check dials whatever URL an admin is saving, so one tenant
+    could hold every slot it shares. One ceiling shared between any two would
+    let the first starve the second.
     """
 
     def __init__(self, *, limit: int, admission_timeout_s: float) -> None:
@@ -501,6 +504,7 @@ class ConcurrencyGate:
 
 DISCOVERY_GATE = ConcurrencyGate(limit=DISCOVERY_CONCURRENCY, admission_timeout_s=DISCOVERY_ADMISSION_TIMEOUT_S)
 EXECUTION_GATE = ConcurrencyGate(limit=EXECUTION_CONCURRENCY, admission_timeout_s=EXECUTION_ADMISSION_TIMEOUT_S)
+CHECK_GATE = ConcurrencyGate(limit=CHECK_CONCURRENCY, admission_timeout_s=DISCOVERY_ADMISSION_TIMEOUT_S)
 
 
 async def _run_in_owner_task(operation: Coroutine[Any, Any, T]) -> T:
@@ -617,10 +621,22 @@ class DiscoveredCatalog:
 class ContactObserver(Protocol):
     """Hears what a real request found when it talked to a stored server, without waiting or raising."""
 
-    def reached(self, server_id: uuid.UUID | str | None, url: str, listing: ServerCheck | None = None) -> None:
-        """The server answered; ``listing`` is its whole tool catalog, when the request read one."""
+    def reached(
+        self,
+        server_id: uuid.UUID | str | None,
+        url: str,
+        listing: ServerCheck | None = None,
+        *,
+        credential_mode: str | None = None,
+    ) -> None:
+        """The server answered; ``listing`` is its whole tool catalog, when the request read one.
 
-    def failed(self, server_id: uuid.UUID | str | None, url: str, failure: BaseException) -> None:
+        ``credential_mode`` is whose credential the request sent, where it knows.
+        """
+
+    def failed(
+        self, server_id: uuid.UUID | str | None, url: str, failure: BaseException, *, credential_mode: str | None = None
+    ) -> None:
         """No session could be opened on the server."""
 
 
@@ -656,6 +672,7 @@ async def discover_stored_tools(
     contacts: ContactObserver | None = None,
     listings: ToolListings | None = None,
     refresh: bool = False,
+    timings: MutableMapping[str, float] | None = None,
 ) -> DiscoveredCatalog:
     """List the live tools a stored server's allowlist admits, and of those, the ones ``admits`` lets the caller see.
 
@@ -668,23 +685,31 @@ async def discover_stored_tools(
     no tool. ``contacts`` hears whether the server answered, and its catalog where the
     listing read all of it. With ``listings``, the server's raw answer is reused
     while it is kept, unless ``refresh``; the filter and screening run every time.
+    ``timings``, when given, gets ``admission_ms`` once this caller's own listing holds a slot,
+    which is how a caller whose deadline ends the listing tells the server's silence from a wait
+    for capacity or for another caller's listing.
 
     Raises:
         McpExecutionError: with the code and status the route returns.
     """
     if listings is None:
-        listed, age_s = await _list_live(server, contacts), 0.0
+        listed, age_s = await _list_live(server, contacts, timings), 0.0
     else:
         listed, age_s = await listings.get_or_load(
-            listing_key(server), lambda: _list_live(server, contacts), refresh=refresh
+            listing_key(server), lambda: _list_live(server, contacts, timings), refresh=refresh
         )
     catalog = _screened(listed, admits)
     return DiscoveredCatalog(tools=catalog.tools, warnings=catalog.warnings, age_s=age_s)
 
 
-async def _list_live(server: ResolvedMcpServer, contacts: ContactObserver | None) -> list[MCPTool]:
+async def _list_live(
+    server: ResolvedMcpServer, contacts: ContactObserver | None, timings: MutableMapping[str, float] | None = None
+) -> list[MCPTool]:
+    admission_started = monotonic()
     try:
         async with DISCOVERY_GATE.slot():
+            if timings is not None:
+                timings["admission_ms"] = (monotonic() - admission_started) * 1000
             return await _run_in_owner_task(_list_once(server, contacts))
     except McpCapacityUnavailable:
         raise McpExecutionError(CODE_DISCOVERY_CAPACITY_UNAVAILABLE, ExecutionState.NOT_STARTED, 503) from None
@@ -701,7 +726,7 @@ async def _list_live(server: ResolvedMcpServer, contacts: ContactObserver | None
         # failure of all escape the error contract and answer nothing.
         logger.warning("Stateless MCP discovery failed error_class=%s", failure_class(exc))
         if contacts is not None:
-            contacts.failed(server.id, server.url, exc)
+            contacts.failed(server.id, server.url, exc, credential_mode=server.credential_mode)
         raise McpExecutionError(CODE_CONNECTION_FAILED, ExecutionState.NOT_STARTED, 502) from None
 
 
@@ -715,7 +740,12 @@ async def _list_once(server: ResolvedMcpServer, contacts: ContactObserver | None
             raise McpExecutionError(CODE_DISCOVERY_LIMIT_EXCEEDED, ExecutionState.NOT_STARTED, 502) from None
         if contacts is not None:
             # An allow-list stops the listing early, so only a server without one was read in full.
-            contacts.reached(server.id, server.url, catalog_of(listed) if server.allowed_tools is None else None)
+            contacts.reached(
+                server.id,
+                server.url,
+                catalog_of(listed) if server.allowed_tools is None else None,
+                credential_mode=server.credential_mode,
+            )
         return listed
     finally:
         await _close_bounded(stack)
@@ -989,11 +1019,11 @@ async def check_stored_server(server: ResolvedMcpServer) -> ServerCheck:
     caller's to settle first, as they are for discovery.
 
     Raises:
-        McpCapacityUnavailable: no discovery slot freed up in time, so nothing was checked.
+        McpCapacityUnavailable: no check slot freed up in time, so nothing was checked.
     """
     deadline = asyncio.timeout(DISCOVERY_TOTAL_TIMEOUT_S)
     try:
-        async with deadline, DISCOVERY_GATE.slot():
+        async with deadline, CHECK_GATE.slot():
             return await _run_in_owner_task(_check_once(server))
     except McpCapacityUnavailable:
         raise
@@ -1116,13 +1146,13 @@ async def _execute_once(
             task = asyncio.current_task()
             cancelled = isinstance(exc, asyncio.CancelledError) and task is not None and task.cancelling()
             if contacts is not None and not cancelled:
-                contacts.failed(server.id, server.url, exc)
+                contacts.failed(server.id, server.url, exc, credential_mode=server.credential_mode)
             raise McpExecutionError(CODE_CONNECTION_FAILED, ExecutionState.NOT_STARTED, 502) from None
 
         timings["connect_ms"] = (monotonic() - phase_started) * 1000
         if contacts is not None:
             # The session initialized, which is the server answering, whatever the call then does.
-            contacts.reached(server.id, server.url)
+            contacts.reached(server.id, server.url, credential_mode=server.credential_mode)
         if on_dispatch is not None:
             on_dispatch()
         phase_started = monotonic()
